@@ -1,0 +1,34 @@
+[package]
+name = "lock-ime"
+version = "0.1.0"
+edition = "2021"
+description = "常驻后台的 Windows 输入法模式锁定工具：中文锁中文模式、日文锁平假名、CapsLock 切输入法"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+directories = "5"
+tray-icon = "0.19"
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_Ime",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Accessibility",
+    "Win32_UI_TextServices",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_Globalization",
+]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
