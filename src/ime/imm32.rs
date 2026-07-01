@@ -55,10 +55,21 @@ pub fn set_conversion_mode(hwnd: HWND, mode: u32) -> bool {
     true
 }
 
-/// 确保中文输入法处于中文模式：若当前为关（英文直输）则打开。
+/// 确保中文输入法处于中文模式。
+///
+/// 微软拼音按 Shift 切中/英时 IME 仍保持开状态，只翻转 `IME_CMODE_NATIVE`
+/// 位（中文=native，英文直输子模式=alphanumeric）。故须同时保证：
+///   1. IME 开状态为 true；
+///   2. 转换模式含 `IME_CMODE_NATIVE` 位。
+/// 仅查开状态会让英文子模式漏判为「已中文」，锁不住。
 pub fn ensure_chinese(hwnd: HWND) {
     if get_open_status(hwnd) != Some(true) {
         set_open_status(hwnd, true);
+    }
+    if let Some(mode) = get_conversion_mode(hwnd) {
+        if (mode & crate::ime::IME_CMODE_NATIVE) == 0 {
+            set_conversion_mode(hwnd, mode | crate::ime::IME_CMODE_NATIVE);
+        }
     }
 }
 
