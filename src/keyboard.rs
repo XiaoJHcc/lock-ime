@@ -5,7 +5,7 @@ use crate::lang;
 use crate::TIMER_CAPS;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+    SendInput, HKL, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
     VK_CAPITAL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -167,7 +167,23 @@ fn synth_capslock() {
     }
 }
 
-/// 在前台线程的已安装键盘布局中顺序循环到下一个（等同 Win+Space 的效果）。
+/// 向前台窗口请求切换到指定键盘布局。
+///
+/// 必须用 `PostMessageW` 把请求发到**前台窗口所属线程**；`ActivateKeyboardLayout`
+/// 只改本进程线程的布局，对前台程序无效（这是循环模式此前失效的原因）。
+fn request_layout(hwnd: HWND, hkl: HKL) {
+    unsafe {
+        // lParam 传目标 HKL；wParam 传 0。
+        let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+            hwnd,
+            WM_INPUTLANGCHANGEREQUEST,
+            WPARAM(0),
+            LPARAM(hkl.0 as isize),
+        );
+    }
+}
+
+/// 在已安装键盘布局中顺序循环到下一个（等同 Win+Space 的效果）。
 fn cycle_input_language() {
     let hwnd: HWND = lang::foreground_window();
     if hwnd.is_invalid() {
@@ -175,22 +191,17 @@ fn cycle_input_language() {
     }
     let current = lang::window_layout(hwnd);
     let mut layouts = lang::installed_layouts();
+    layouts.dedup();
     if layouts.len() < 2 {
         return;
     }
-    // 去重并保持顺序；找到当前布局，取下一个。
-    layouts.dedup();
+    // 找到当前布局，取下一个；找不到则从头开始。
     let idx = layouts.iter().position(|h| h.0 == current.0);
     let next = match idx {
         Some(i) => layouts[(i + 1) % layouts.len()],
         None => layouts[0],
     };
-    unsafe {
-        let _ = windows::Win32::UI::Input::KeyboardAndMouse::ActivateKeyboardLayout(
-            next,
-            windows::Win32::UI::Input::KeyboardAndMouse::KLF_SETFORPROCESS,
-        );
-    }
+    request_layout(hwnd, next);
 }
 
 /// 在英文(US) 与上一个 CJK 输入法之间切换前台窗口的键盘布局。
@@ -215,14 +226,6 @@ fn toggle_input_language() {
     .flatten();
 
     if let Some(hkl) = target {
-        unsafe {
-            // 向前台窗口请求切换键盘布局；lParam 传 HKL。
-            let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-                hwnd,
-                WM_INPUTLANGCHANGEREQUEST,
-                WPARAM(0),
-                LPARAM(hkl.0 as isize),
-            );
-        }
+        request_layout(hwnd, hkl);
     }
 }
