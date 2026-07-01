@@ -22,6 +22,22 @@ impl Default for JapaneseMode {
     }
 }
 
+/// CapsLock 短按的切换表现。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapslockSwitchMode {
+    /// CJK ↔ 英文 二态切换。
+    CjkUs,
+    /// 顺序循环切换（等同 Win+Space）。
+    Cycle,
+}
+
+impl Default for CapslockSwitchMode {
+    fn default() -> Self {
+        CapslockSwitchMode::CjkUs
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -33,6 +49,8 @@ pub struct Config {
     pub japanese_mode: JapaneseMode,
     /// 功能#3：CapsLock 短按切换输入法。
     pub capslock_switch_enabled: bool,
+    /// CapsLock 短按的切换表现。
+    pub capslock_switch_mode: CapslockSwitchMode,
     /// CapsLock 长按多少毫秒判定为「锁大写」。
     pub capslock_longpress_ms: u64,
     /// 开机自启。
@@ -46,6 +64,7 @@ impl Default for Config {
             japanese_lock_enabled: true,
             japanese_mode: JapaneseMode::Hiragana,
             capslock_switch_enabled: true,
+            capslock_switch_mode: CapslockSwitchMode::CjkUs,
             capslock_longpress_ms: 300,
             autostart: false,
         }

@@ -1,5 +1,6 @@
 //! 低级键盘 hook：CapsLock 短按切输入法、长按锁大写（功能 #3）。
 
+use crate::config::CapslockSwitchMode;
 use crate::lang;
 use crate::TIMER_CAPS;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -101,7 +102,12 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         .unwrap_or(false);
 
         if do_switch {
-            toggle_input_language();
+            let mode = crate::state::with(|st| st.config.capslock_switch_mode)
+                .unwrap_or(CapslockSwitchMode::CjkUs);
+            match mode {
+                CapslockSwitchMode::CjkUs => toggle_input_language(),
+                CapslockSwitchMode::Cycle => cycle_input_language(),
+            }
         }
         // 吞掉物理 CapsLock 抬起。
         return LRESULT(1);
@@ -158,6 +164,32 @@ fn synth_capslock() {
     let inputs = [down, up];
     unsafe {
         SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+/// 在前台线程的已安装键盘布局中顺序循环到下一个（等同 Win+Space 的效果）。
+fn cycle_input_language() {
+    let hwnd: HWND = lang::foreground_window();
+    if hwnd.is_invalid() {
+        return;
+    }
+    let current = lang::window_layout(hwnd);
+    let mut layouts = lang::installed_layouts();
+    if layouts.len() < 2 {
+        return;
+    }
+    // 去重并保持顺序；找到当前布局，取下一个。
+    layouts.dedup();
+    let idx = layouts.iter().position(|h| h.0 == current.0);
+    let next = match idx {
+        Some(i) => layouts[(i + 1) % layouts.len()],
+        None => layouts[0],
+    };
+    unsafe {
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::ActivateKeyboardLayout(
+            next,
+            windows::Win32::UI::Input::KeyboardAndMouse::KLF_SETFORPROCESS,
+        );
     }
 }
 

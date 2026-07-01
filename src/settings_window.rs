@@ -1,6 +1,6 @@
 //! 设置窗口：用 Win32 原生控件做一个简单的设置页面。
 
-use crate::config::JapaneseMode;
+use crate::config::{CapslockSwitchMode, JapaneseMode};
 use std::cell::Cell;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,6 +48,8 @@ const ID_RAD_FULL: i32 = 1007;
 const ID_EDIT_LP: i32 = 1008;
 const ID_BTN_OK: i32 = 1009;
 const ID_BTN_CANCEL: i32 = 1010;
+const ID_RAD_CJKUS: i32 = 1011;
+const ID_RAD_CYCLE: i32 = 1012;
 
 thread_local! {
     static WND: Cell<Option<HWND>> = const { Cell::new(None) };
@@ -73,6 +75,7 @@ pub fn open() {
                 lpfnWndProc: Some(wndproc),
                 hInstance: hinst,
                 lpszClassName: class_name,
+                hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(16usize as *mut _), // COLOR_BTNFACE + 1
                 ..Default::default()
             };
             RegisterClassW(&wc);
@@ -83,8 +86,8 @@ pub fn open() {
                 WINDOW_STYLE(WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU),
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                400,
-                400,
+                420,
+                470,
                 None,
                 None,
                 hinst,
@@ -140,75 +143,49 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 let btn = |s: u32| s | WS_CHILD | WS_VISIBLE;
                 let ctl = |s: u32| s | WS_CHILD | WS_VISIBLE | WS_TABSTOP;
 
-                make(w!("BUTTON"), w!("功能"), btn(BS_GROUPBOX), 10, 5, 370, 140, 1000);
+                // 区1：中文
+                make(w!("BUTTON"), w!("中文"), btn(BS_GROUPBOX), 10, 5, 390, 55, 1000);
                 make(
                     w!("BUTTON"),
-                    w!("中文输入法锁定为中文模式"),
+                    w!("锁定为中文模式"),
                     btn(BS_AUTOCHECKBOX),
                     25,
-                    30,
-                    330,
+                    27,
+                    360,
                     22,
                     ID_CHK_CN,
                 );
+
+                // 区2：日文
+                make(w!("BUTTON"), w!("日文"), btn(BS_GROUPBOX), 10, 65, 390, 105, 1000);
                 make(
                     w!("BUTTON"),
-                    w!("日文输入法锁定转换模式"),
+                    w!("锁定转换模式"),
                     btn(BS_AUTOCHECKBOX),
                     25,
-                    55,
-                    330,
+                    87,
+                    360,
                     22,
                     ID_CHK_JA,
                 );
+                // 转换模式三选一横排。
                 make(
                     w!("BUTTON"),
-                    w!("CapsLock 短按切换输入法"),
-                    btn(BS_AUTOCHECKBOX),
-                    25,
-                    80,
-                    330,
-                    22,
-                    ID_CHK_CAPS,
-                );
-                make(
-                    w!("BUTTON"),
-                    w!("开机自启"),
-                    btn(BS_AUTOCHECKBOX),
-                    25,
-                    105,
-                    330,
-                    22,
-                    ID_CHK_AUTO,
-                );
-
-                make(
-                    w!("BUTTON"),
-                    w!("日文转换模式"),
-                    btn(BS_GROUPBOX),
-                    10,
-                    155,
-                    370,
-                    120,
-                    1000,
-                );
-                make(
-                    w!("BUTTON"),
-                    w!("平假名（全角）"),
+                    w!("平假名"),
                     ctl(BS_AUTORADIOBUTTON | WS_GROUP),
-                    25,
-                    180,
-                    330,
+                    40,
+                    120,
+                    110,
                     22,
                     ID_RAD_HIRA,
                 );
                 make(
                     w!("BUTTON"),
-                    w!("片假名（全角）"),
+                    w!("片假名"),
                     ctl(BS_AUTORADIOBUTTON),
-                    25,
-                    205,
-                    330,
+                    160,
+                    120,
+                    110,
                     22,
                     ID_RAD_KATA,
                 );
@@ -216,20 +193,53 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     w!("BUTTON"),
                     w!("全角英数"),
                     ctl(BS_AUTORADIOBUTTON),
-                    25,
-                    230,
-                    330,
+                    280,
+                    120,
+                    110,
                     22,
                     ID_RAD_FULL,
                 );
 
+                // 区3：CapsLock
+                make(w!("BUTTON"), w!("CapsLock"), btn(BS_GROUPBOX), 10, 175, 390, 145, 1000);
+                make(
+                    w!("BUTTON"),
+                    w!("短按切换输入法"),
+                    btn(BS_AUTOCHECKBOX),
+                    25,
+                    197,
+                    360,
+                    22,
+                    ID_CHK_CAPS,
+                );
+                // 切换表现两选一。
+                make(
+                    w!("BUTTON"),
+                    w!("CJK / US"),
+                    ctl(BS_AUTORADIOBUTTON | WS_GROUP),
+                    40,
+                    230,
+                    170,
+                    22,
+                    ID_RAD_CJKUS,
+                );
+                make(
+                    w!("BUTTON"),
+                    w!("循环"),
+                    ctl(BS_AUTORADIOBUTTON),
+                    220,
+                    230,
+                    170,
+                    22,
+                    ID_RAD_CYCLE,
+                );
                 make(
                     w!("STATIC"),
-                    w!("CapsLock 长按判定 (毫秒)"),
+                    w!("长按切换大写锁定（毫秒）"),
                     btn(SS_LEFT),
-                    25,
-                    290,
-                    200,
+                    40,
+                    268,
+                    120,
                     20,
                     1000,
                 );
@@ -237,20 +247,34 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     w!("EDIT"),
                     w!("300"),
                     ctl(WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER),
-                    230,
-                    288,
+                    160,
+                    266,
                     80,
                     22,
                     ID_EDIT_LP,
                 );
 
+                // 区4：开机自启
+                make(w!("BUTTON"), w!("开机自启"), btn(BS_GROUPBOX), 10, 325, 390, 55, 1000);
+                make(
+                    w!("BUTTON"),
+                    w!("随 Windows 启动"),
+                    btn(BS_AUTOCHECKBOX),
+                    25,
+                    347,
+                    360,
+                    22,
+                    ID_CHK_AUTO,
+                );
+
+                // 底部按钮。
                 make(
                     w!("BUTTON"),
                     w!("确定"),
                     ctl(BS_DEFPUSHBUTTON | WS_GROUP),
-                    190,
-                    325,
-                    90,
+                    200,
+                    390,
+                    95,
                     28,
                     ID_BTN_OK,
                 );
@@ -258,9 +282,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     w!("BUTTON"),
                     w!("取消"),
                     ctl(BS_PUSHBUTTON),
-                    290,
-                    325,
-                    90,
+                    305,
+                    390,
+                    95,
                     28,
                     ID_BTN_CANCEL,
                 );
@@ -325,13 +349,14 @@ fn set_checked(hwnd: HWND, id: i32, v: bool) {
 }
 
 fn load_config_to_controls(hwnd: HWND) {
-    let (cn, ja, caps, auto, mode, lp) = crate::state::with(|st| {
+    let (cn, ja, caps, auto, mode, caps_mode, lp) = crate::state::with(|st| {
         (
             st.config.chinese_lock_enabled,
             st.config.japanese_lock_enabled,
             st.config.capslock_switch_enabled,
             st.config.autostart,
             st.config.japanese_mode,
+            st.config.capslock_switch_mode,
             st.config.capslock_longpress_ms,
         )
     })
@@ -347,6 +372,14 @@ fn load_config_to_controls(hwnd: HWND) {
             JapaneseMode::Hiragana => ID_RAD_HIRA,
             JapaneseMode::Katakana => ID_RAD_KATA,
             JapaneseMode::FullWidthAlnum => ID_RAD_FULL,
+        },
+        true,
+    );
+    set_checked(
+        hwnd,
+        match caps_mode {
+            CapslockSwitchMode::CjkUs => ID_RAD_CJKUS,
+            CapslockSwitchMode::Cycle => ID_RAD_CYCLE,
         },
         true,
     );
@@ -371,6 +404,11 @@ fn apply_controls(hwnd: HWND) -> bool {
     } else {
         JapaneseMode::FullWidthAlnum
     };
+    let caps_mode = if is_checked(hwnd, ID_RAD_CYCLE) {
+        CapslockSwitchMode::Cycle
+    } else {
+        CapslockSwitchMode::CjkUs
+    };
     let lp = unsafe {
         let h = GetDlgItem(hwnd, ID_EDIT_LP).unwrap_or(HWND(null_mut()));
         let mut buf = [0u16; 32];
@@ -385,6 +423,7 @@ fn apply_controls(hwnd: HWND) -> bool {
         st.config.japanese_lock_enabled = ja;
         st.config.japanese_mode = mode;
         st.config.capslock_switch_enabled = caps;
+        st.config.capslock_switch_mode = caps_mode;
         st.config.capslock_longpress_ms = lp;
         st.config.autostart = auto;
         let _ = st.config.save();
