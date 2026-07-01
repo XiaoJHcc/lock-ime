@@ -33,6 +33,14 @@ pub const TIMER_APPLY: usize = 1;
 pub const TIMER_CAPS: usize = 2;
 
 fn main() {
+    // 声明 Per-Monitor-V2 DPI 感知：必须在创建任何窗口之前调用，
+    // 否则设置窗口会被系统位图拉伸，在高 DPI（如 4K 150%）下发虚。
+    unsafe {
+        let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+            windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        );
+    }
+
     let config = Config::load();
 
     // 与注册表保持一致：每次启动按配置同步自启项。

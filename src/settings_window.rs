@@ -5,15 +5,21 @@ use std::cell::Cell;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows::core::{w, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::Graphics::Gdi::{GetStockObject, DEFAULT_GUI_FONT};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{CreateFontW, DeleteObject, HGDIOBJ};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, CREATESTRUCTW, CW_USEDEFAULT, DefWindowProcW, DestroyWindow, GetDlgItem,
-    GetWindowTextW, HMENU, RegisterClassW, SendMessageW, SetForegroundWindow, SetWindowTextW,
-    ShowWindow, SW_SHOW, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_SETFONT,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
+    GetWindowTextW, HMENU, RegisterClassW, SendMessageW, SetForegroundWindow, SetWindowPos,
+    SetWindowTextW, ShowWindow, SET_WINDOW_POS_FLAGS, SW_SHOW, WM_CLOSE, WM_COMMAND, WM_CREATE,
+    WM_DESTROY, WM_SETFONT, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
 };
+
+// SetWindowPos 标志。
+const SWP_NOMOVE: u32 = 0x0002;
+const SWP_NOZORDER: u32 = 0x0004;
+const SWP_NOACTIVATE: u32 = 0x0010;
 
 // 控件风格数值常量。
 const BS_AUTOCHECKBOX: u32 = 0x0003;
@@ -53,6 +59,8 @@ const ID_RAD_CYCLE: i32 = 1012;
 
 thread_local! {
     static WND: Cell<Option<HWND>> = const { Cell::new(None) };
+    // 设置窗口的字体句柄（HFONT.0 as isize），WM_DESTROY 时释放。
+    static FONT: Cell<isize> = const { Cell::new(0) };
 }
 
 /// 设置窗口确定后置位，主消息循环检测后调用 `Tray::refresh` 并清除。
@@ -106,7 +114,30 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             unsafe {
                 let cs = &*(lparam.0 as *const CREATESTRUCTW);
                 let hinst = cs.hInstance;
-                let hfont = GetStockObject(DEFAULT_GUI_FONT);
+
+                // 按窗口 DPI 缩放（96 = 100%）。所有坐标以 96-dpi 逻辑像素书写。
+                let dpi = GetDpiForWindow(hwnd).max(96) as i32;
+                let s = move |v: i32| v * dpi / 96;
+
+                // 用 ClearType 雅黑替换发虚的位图 DEFAULT_GUI_FONT。
+                let hfont = CreateFontW(
+                    -(9 * dpi / 72), // 9pt
+                    0,
+                    0,
+                    0,
+                    400, // FW_NORMAL
+                    0,
+                    0,
+                    0,
+                    1, // DEFAULT_CHARSET
+                    0,
+                    0,
+                    5, // CLEARTYPE_QUALITY
+                    0,
+                    w!("Microsoft YaHei UI"),
+                );
+                FONT.with(|c| c.set(hfont.0 as isize));
+
                 let make = |class: PCWSTR,
                             text: PCWSTR,
                             style: u32,
@@ -121,175 +152,83 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         class,
                         text,
                         WINDOW_STYLE(style),
-                        x,
-                        y,
-                        w,
-                        h,
+                        s(x),
+                        s(y),
+                        s(w),
+                        s(h),
                         hwnd,
                         HMENU(id as usize as *mut _),
                         hinst,
                         None,
                     )
                     .unwrap_or(HWND(null_mut()));
-                    let _ = SendMessageW(
-                        child,
-                        WM_SETFONT,
-                        WPARAM(hfont.0 as usize),
-                        LPARAM(1),
-                    );
+                    let _ = SendMessageW(child, WM_SETFONT, WPARAM(hfont.0 as usize), LPARAM(1));
                     child
                 };
 
                 let btn = |s: u32| s | WS_CHILD | WS_VISIBLE;
                 let ctl = |s: u32| s | WS_CHILD | WS_VISIBLE | WS_TABSTOP;
 
+                // ---- 统一网格（96-dpi 逻辑像素）----
+                // 分组框：x=12, 宽=356（窗口客户区宽 380，左右各留 12）。
+                // 组内：复选框 x=26；单选/标签缩进 x=40；行高 20，按钮高 28。
+                const GX: i32 = 12;
+                const GW: i32 = 356;
+                const CX: i32 = 26; // 复选框左
+                const CW_: i32 = GW - (CX - GX) - 12; // 组内控件宽
+                const RX: i32 = 40; // 单选/标签缩进
+
                 // 区1：中文
-                make(w!("BUTTON"), w!("中文"), btn(BS_GROUPBOX), 10, 5, 390, 55, 1000);
-                make(
-                    w!("BUTTON"),
-                    w!("锁定为中文模式"),
-                    btn(BS_AUTOCHECKBOX),
-                    25,
-                    27,
-                    360,
-                    22,
-                    ID_CHK_CN,
-                );
+                make(w!("BUTTON"), w!("中文"), btn(BS_GROUPBOX), GX, 10, GW, 52, 1000);
+                make(w!("BUTTON"), w!("锁定为中文模式"), btn(BS_AUTOCHECKBOX), CX, 34, CW_, 20, ID_CHK_CN);
 
                 // 区2：日文
-                make(w!("BUTTON"), w!("日文"), btn(BS_GROUPBOX), 10, 65, 390, 105, 1000);
-                make(
-                    w!("BUTTON"),
-                    w!("锁定转换模式"),
-                    btn(BS_AUTOCHECKBOX),
-                    25,
-                    87,
-                    360,
-                    22,
-                    ID_CHK_JA,
-                );
-                // 转换模式三选一横排。
-                make(
-                    w!("BUTTON"),
-                    w!("平假名"),
-                    ctl(BS_AUTORADIOBUTTON | WS_GROUP),
-                    40,
-                    120,
-                    110,
-                    22,
-                    ID_RAD_HIRA,
-                );
-                make(
-                    w!("BUTTON"),
-                    w!("片假名"),
-                    ctl(BS_AUTORADIOBUTTON),
-                    160,
-                    120,
-                    110,
-                    22,
-                    ID_RAD_KATA,
-                );
-                make(
-                    w!("BUTTON"),
-                    w!("全角英数"),
-                    ctl(BS_AUTORADIOBUTTON),
-                    280,
-                    120,
-                    110,
-                    22,
-                    ID_RAD_FULL,
-                );
+                make(w!("BUTTON"), w!("日文"), btn(BS_GROUPBOX), GX, 72, GW, 100, 1000);
+                make(w!("BUTTON"), w!("锁定转换模式"), btn(BS_AUTOCHECKBOX), CX, 96, CW_, 20, ID_CHK_JA);
+                // 转换模式三选一横排，等距。
+                make(w!("BUTTON"), w!("平假名"), ctl(BS_AUTORADIOBUTTON | WS_GROUP), RX, 128, 100, 20, ID_RAD_HIRA);
+                make(w!("BUTTON"), w!("片假名"), ctl(BS_AUTORADIOBUTTON), RX + 108, 128, 100, 20, ID_RAD_KATA);
+                make(w!("BUTTON"), w!("全角英数"), ctl(BS_AUTORADIOBUTTON), RX + 216, 128, 100, 20, ID_RAD_FULL);
 
                 // 区3：CapsLock
-                make(w!("BUTTON"), w!("CapsLock"), btn(BS_GROUPBOX), 10, 175, 390, 145, 1000);
-                make(
-                    w!("BUTTON"),
-                    w!("短按切换输入法"),
-                    btn(BS_AUTOCHECKBOX),
-                    25,
-                    197,
-                    360,
-                    22,
-                    ID_CHK_CAPS,
-                );
+                make(w!("BUTTON"), w!("CapsLock"), btn(BS_GROUPBOX), GX, 182, GW, 128, 1000);
+                make(w!("BUTTON"), w!("短按切换输入法"), btn(BS_AUTOCHECKBOX), CX, 206, CW_, 20, ID_CHK_CAPS);
                 // 切换表现两选一。
-                make(
-                    w!("BUTTON"),
-                    w!("CJK / US"),
-                    ctl(BS_AUTORADIOBUTTON | WS_GROUP),
-                    40,
-                    230,
-                    170,
-                    22,
-                    ID_RAD_CJKUS,
-                );
-                make(
-                    w!("BUTTON"),
-                    w!("循环"),
-                    ctl(BS_AUTORADIOBUTTON),
-                    220,
-                    230,
-                    170,
-                    22,
-                    ID_RAD_CYCLE,
-                );
-                make(
-                    w!("STATIC"),
-                    w!("长按切换大写锁定（毫秒）"),
-                    btn(SS_LEFT),
-                    40,
-                    268,
-                    120,
-                    20,
-                    1000,
-                );
-                make(
-                    w!("EDIT"),
-                    w!("300"),
-                    ctl(WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER),
-                    160,
-                    266,
-                    80,
-                    22,
-                    ID_EDIT_LP,
-                );
+                make(w!("BUTTON"), w!("CJK / US 切换"), ctl(BS_AUTORADIOBUTTON | WS_GROUP), RX, 238, 150, 20, ID_RAD_CJKUS);
+                make(w!("BUTTON"), w!("正常循环"), ctl(BS_AUTORADIOBUTTON), RX + 160, 238, 150, 20, ID_RAD_CYCLE);
+                // 长按阈值：标签与输入框同一行、垂直居中对齐。
+                make(w!("STATIC"), w!("长按大写锁定 阈值（毫秒）"), btn(SS_LEFT), RX, 276, 190, 20, 1000);
+                make(w!("EDIT"), w!("300"), ctl(WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER), RX + 194, 274, 70, 24, ID_EDIT_LP);
 
                 // 区4：开机自启
-                make(w!("BUTTON"), w!("开机自启"), btn(BS_GROUPBOX), 10, 325, 390, 55, 1000);
-                make(
-                    w!("BUTTON"),
-                    w!("随 Windows 启动"),
-                    btn(BS_AUTOCHECKBOX),
-                    25,
-                    347,
-                    360,
-                    22,
-                    ID_CHK_AUTO,
-                );
+                make(w!("BUTTON"), w!("开机自启"), btn(BS_GROUPBOX), GX, 320, GW, 52, 1000);
+                make(w!("BUTTON"), w!("随 Windows 启动"), btn(BS_AUTOCHECKBOX), CX, 344, CW_, 20, ID_CHK_AUTO);
 
-                // 底部按钮。
-                make(
-                    w!("BUTTON"),
-                    w!("确定"),
-                    ctl(BS_DEFPUSHBUTTON | WS_GROUP),
-                    200,
-                    390,
-                    95,
-                    28,
-                    ID_BTN_OK,
-                );
-                make(
-                    w!("BUTTON"),
-                    w!("取消"),
-                    ctl(BS_PUSHBUTTON),
-                    305,
-                    390,
-                    95,
-                    28,
-                    ID_BTN_CANCEL,
-                );
+                // 底部按钮，右对齐到分组框右缘。
+                make(w!("BUTTON"), w!("确定"), ctl(BS_DEFPUSHBUTTON | WS_GROUP), 176, 388, 92, 28, ID_BTN_OK);
+                make(w!("BUTTON"), w!("取消"), ctl(BS_PUSHBUTTON), 276, 388, 92, 28, ID_BTN_CANCEL);
 
                 load_config_to_controls(hwnd);
+
+                // 按 DPI 调整窗口外框，使客户区正好容纳网格（380 x 430 逻辑像素）。
+                let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+                let mut rc = RECT { left: 0, top: 0, right: s(380), bottom: s(430) };
+                let _ = AdjustWindowRectExForDpi(
+                    &mut rc,
+                    WINDOW_STYLE(style),
+                    false,
+                    WINDOW_EX_STYLE(0),
+                    dpi as u32,
+                );
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    0,
+                    0,
+                    rc.right - rc.left,
+                    rc.bottom - rc.top,
+                    SET_WINDOW_POS_FLAGS(SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE),
+                );
             }
             LRESULT(0)
         }
@@ -318,6 +257,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             LRESULT(0)
         }
         WM_DESTROY => {
+            FONT.with(|c| {
+                let v = c.get();
+                if v != 0 {
+                    unsafe {
+                        let _ = DeleteObject(HGDIOBJ(v as *mut _));
+                    }
+                    c.set(0);
+                }
+            });
             WND.with(|c| {
                 if c.get() == Some(hwnd) {
                     c.set(None);
