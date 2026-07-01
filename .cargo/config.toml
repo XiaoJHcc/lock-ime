@@ -1,0 +1,4 @@
+# 静态链接 MSVC C 运行时，使发布 exe 不依赖 VC++ 运行库（vcruntime140.dll）。
+# 目标：真正的单文件、随处双击即用。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

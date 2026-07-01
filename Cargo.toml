@@ -28,6 +28,11 @@ features = [
     "Win32_UI_HiDpi",
 ]
 
+[build-dependencies]
+png = "0.17"
+ico = "0.3"
+winresource = "0.1"
+
 [profile.release]
 opt-level = "z"
 lto = true

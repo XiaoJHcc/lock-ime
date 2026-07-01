@@ -24,29 +24,13 @@ fn japanese_label(mode: JapaneseMode) -> &'static str {
     }
 }
 
-/// 生成一个简单的 32x32 托盘图标（蓝底白「中」框），避免外部资源文件。
+// 托盘图标资源：构建期由 PSD/lock-ime-logo.png 最近邻放大生成的像素画，
+// 与应用图标同源（见 build.rs）。tray_meta.rs 定义 TRAY_W / TRAY_H。
+include!(concat!(env!("OUT_DIR"), "/tray_meta.rs"));
+const TRAY_RGBA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tray_rgba.bin"));
+
 fn make_icon() -> Option<Icon> {
-    const N: usize = 32;
-    let mut rgba = vec![0u8; N * N * 4];
-    for y in 0..N {
-        for x in 0..N {
-            let i = (y * N + x) * 4;
-            let border = x < 2 || x >= N - 2 || y < 2 || y >= N - 2;
-            let inner = x >= 10 && x < 22 && y >= 6 && y < 26;
-            let (r, g, b) = if border {
-                (20, 90, 200)
-            } else if inner {
-                (255, 255, 255)
-            } else {
-                (30, 110, 230)
-            };
-            rgba[i] = r;
-            rgba[i + 1] = g;
-            rgba[i + 2] = b;
-            rgba[i + 3] = 255;
-        }
-    }
-    Icon::from_rgba(rgba, N as u32, N as u32).ok()
+    Icon::from_rgba(TRAY_RGBA.to_vec(), TRAY_W, TRAY_H).ok()
 }
 
 impl Tray {
