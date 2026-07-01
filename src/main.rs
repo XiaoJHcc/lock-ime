@@ -12,6 +12,7 @@ mod events;
 mod ime;
 mod keyboard;
 mod lang;
+mod settings_window;
 mod state;
 mod tray;
 
@@ -140,6 +141,11 @@ fn run_message_loop(tray: Option<&tray::Tray>) {
                 if tray.handle(&event.id) {
                     return; // 退出。
                 }
+            }
+            if settings_window::NEED_REFRESH
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                tray.refresh();
             }
         }
     }

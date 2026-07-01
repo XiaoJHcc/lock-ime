@@ -1,6 +1,7 @@
 //! 系统托盘图标与菜单。
 
 use crate::autostart;
+use crate::config::JapaneseMode;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
@@ -11,8 +12,16 @@ pub struct Tray {
     japanese: CheckMenuItem,
     capslock: CheckMenuItem,
     autostart: CheckMenuItem,
-    open_config: MenuItem,
+    open_settings: MenuItem,
     quit: MenuItem,
+}
+
+fn japanese_label(mode: JapaneseMode) -> &'static str {
+    match mode {
+        JapaneseMode::Hiragana => "日文锁平假名",
+        JapaneseMode::Katakana => "日文锁片假名",
+        JapaneseMode::FullWidthAlnum => "日文锁全角英数",
+    }
 }
 
 /// 生成一个简单的 32x32 托盘图标（蓝底白「中」框），避免外部资源文件。
@@ -43,20 +52,21 @@ fn make_icon() -> Option<Icon> {
 impl Tray {
     /// 依据当前配置创建托盘。
     pub fn new() -> Option<Tray> {
-        let (cn, ja, caps, auto) = crate::state::with(|st| {
+        let (cn, ja, caps, auto, ja_mode) = crate::state::with(|st| {
             (
                 st.config.chinese_lock_enabled,
                 st.config.japanese_lock_enabled,
                 st.config.capslock_switch_enabled,
                 st.config.autostart,
+                st.config.japanese_mode,
             )
         })?;
 
         let chinese = CheckMenuItem::new("中文锁中文模式", true, cn, None);
-        let japanese = CheckMenuItem::new("日文锁平假名", true, ja, None);
+        let japanese = CheckMenuItem::new(japanese_label(ja_mode), true, ja, None);
         let capslock = CheckMenuItem::new("CapsLock 切换输入法", true, caps, None);
         let autostart_item = CheckMenuItem::new("开机自启", true, auto, None);
-        let open_config = MenuItem::new("打开配置文件", true, None);
+        let open_settings = MenuItem::new("设置…", true, None);
         let quit = MenuItem::new("退出", true, None);
 
         let menu = Menu::new();
@@ -65,7 +75,7 @@ impl Tray {
         let _ = menu.append(&capslock);
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&autostart_item);
-        let _ = menu.append(&open_config);
+        let _ = menu.append(&open_settings);
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&quit);
 
@@ -84,9 +94,28 @@ impl Tray {
             japanese,
             capslock,
             autostart: autostart_item,
-            open_config,
+            open_settings,
             quit,
         })
+    }
+
+    /// 从当前配置同步菜单勾选状态与日文标签。
+    pub fn refresh(&self) {
+        let (cn, ja, caps, auto, ja_mode) = crate::state::with(|st| {
+            (
+                st.config.chinese_lock_enabled,
+                st.config.japanese_lock_enabled,
+                st.config.capslock_switch_enabled,
+                st.config.autostart,
+                st.config.japanese_mode,
+            )
+        })
+        .unwrap_or_default();
+        self.chinese.set_checked(cn);
+        self.japanese.set_checked(ja);
+        self.japanese.set_text(japanese_label(ja_mode));
+        self.capslock.set_checked(caps);
+        self.autostart.set_checked(auto);
     }
 
     /// 处理一次菜单事件。返回 true 表示请求退出程序。
@@ -94,15 +123,8 @@ impl Tray {
         if id == self.quit.id() {
             return true;
         }
-        if id == self.open_config.id() {
-            let path = crate::config::Config::path();
-            // 确保文件存在后用默认程序打开。
-            crate::state::with(|st| {
-                let _ = st.config.save();
-            });
-            let _ = std::process::Command::new("cmd")
-                .args(["/C", "start", "", &path.to_string_lossy()])
-                .spawn();
+        if id == self.open_settings.id() {
+            crate::settings_window::open();
             return false;
         }
 
