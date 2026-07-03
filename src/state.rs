@@ -8,6 +8,15 @@ use std::cell::RefCell;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
 
+/// 一次切换的目标判定：校验循环据此判断「是否已到位」。
+#[derive(Clone, Copy)]
+pub enum SwitchGoal {
+    /// 二态切换：前台主语言 ID 达到该值即完成。
+    ReachLang(u16),
+    /// 循环切换：前台布局 HKL 只要不再等于该原始值（发生了移动）即完成。
+    LeaveHkl(isize),
+}
+
 pub struct AppState {
     pub config: Config,
     /// 隐藏的消息窗口，用于接收 WM_TIMER 等。
@@ -21,8 +30,13 @@ pub struct AppState {
     /// 正在合成注入按键，键盘 hook 应放行自己注入的事件。
     pub injecting: bool,
 
-    /// CapsLock 切换时记住的「上一个 CJK 键盘布局」。
+    // ---- 输入法切换（HKL 直切优先 + Win+Space 兜底 + 定时器校验）----
+    /// 二态切换时记住的「上一个 CJK 键盘布局」，用于切回。
     pub last_cjk_hkl: Option<HKL>,
+    /// 进行中的切换目标判定（None = 无进行中的切换）。
+    pub switch_goal: Option<SwitchGoal>,
+    /// 兜底阶段还可再合成几次 Win+Space（防死循环上限）。
+    pub switch_remaining: u8,
 }
 
 impl AppState {
@@ -34,6 +48,8 @@ impl AppState {
             caps_consumed: false,
             injecting: false,
             last_cjk_hkl: None,
+            switch_goal: None,
+            switch_remaining: 0,
         }
     }
 }

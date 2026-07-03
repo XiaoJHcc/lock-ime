@@ -31,6 +31,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 pub const TIMER_APPLY: usize = 1;
 /// CapsLock 长按判定 timer。
 pub const TIMER_CAPS: usize = 2;
+/// 输入法切换（合成 Win+Space）后的校验循环 timer。
+pub const TIMER_SWITCH: usize = 3;
 
 fn main() {
     // 声明 Per-Monitor-V2 DPI 感知：必须在创建任何窗口之前调用，
@@ -118,6 +120,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         let _ = KillTimer(hwnd, TIMER_CAPS);
                     }
                     keyboard::on_caps_longpress();
+                }
+                TIMER_SWITCH => {
+                    unsafe {
+                        let _ = KillTimer(hwnd, TIMER_SWITCH);
+                    }
+                    keyboard::on_switch_tick();
                 }
                 _ => {}
             }

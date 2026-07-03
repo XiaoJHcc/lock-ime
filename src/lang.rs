@@ -36,7 +36,6 @@ pub fn window_layout(hwnd: HWND) -> HKL {
 }
 
 /// 取前台窗口的键盘布局。
-#[allow(dead_code)]
 pub fn foreground_layout() -> HKL {
     window_layout(foreground_window())
 }
@@ -76,10 +75,9 @@ pub fn installed_layouts() -> Vec<HKL> {
     }
 }
 
-/// 从已安装布局中挑一个非英文（CJK 优先）的布局，作为 CapsLock 切换的默认目标。
+/// 从已安装布局中挑一个非英文（CJK 优先）的布局，作为二态切换的默认目标。
 pub fn pick_non_english_layout() -> Option<HKL> {
     let layouts = installed_layouts();
-    // 优先中文/日文，其次任意非英文。
     layouts
         .iter()
         .find(|h| matches!(primary_lang(**h), LANG_ZH_CN | LANG_JA))
