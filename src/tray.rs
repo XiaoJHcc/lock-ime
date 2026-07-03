@@ -24,7 +24,7 @@ fn japanese_label(mode: JapaneseMode) -> &'static str {
     }
 }
 
-// 托盘图标资源：构建期由 PSD/lock-ime-logo.png 最近邻放大生成的像素画，
+// 托盘图标资源：构建期由 img/lock-ime-logo.png 最近邻放大生成的像素画，
 // 与应用图标同源（见 build.rs）。tray_meta.rs 定义 TRAY_W / TRAY_H。
 include!(concat!(env!("OUT_DIR"), "/tray_meta.rs"));
 const TRAY_RGBA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tray_rgba.bin"));

@@ -1,6 +1,6 @@
 [package]
 name = "lock-ime"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "常驻后台的 Windows 输入法模式锁定工具：中文锁中文模式、日文锁平假名、CapsLock 切输入法"
 

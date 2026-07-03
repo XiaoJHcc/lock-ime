@@ -90,7 +90,7 @@ pub fn open() {
             if let Ok(hwnd) = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 class_name,
-                w!("lock-ime 设置"),
+                w!("Lock IME 设置"),
                 WINDOW_STYLE(WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU),
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,

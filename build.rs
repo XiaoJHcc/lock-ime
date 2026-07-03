@@ -1,4 +1,4 @@
-//! 构建期图标生成：以 PSD/lock-ime-logo.png（16×16 像素画）为唯一来源，
+//! 构建期图标生成：以 img/lock-ime-logo.png（16×16 像素画）为唯一来源，
 //! 用最近邻整数倍放大（绝不插值）生成 exe 应用图标（多尺寸 .ico）与托盘图标
 //! 的原始 RGBA。改了像素画只需重新导出 PNG 再编译即可。
 
@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 
-const SRC: &str = "PSD/lock-ime-logo.png";
+const SRC: &str = "img/lock-ime-logo.png";
 
 fn main() {
     println!("cargo:rerun-if-changed={SRC}");
