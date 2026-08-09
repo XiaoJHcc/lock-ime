@@ -23,8 +23,8 @@ use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, PostQuitMessage,
-    RegisterClassW, TranslateMessage, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY,
-    WM_TIMER, WNDCLASSW,
+    RegisterClassW, SetTimer, TranslateMessage, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_DESTROY, WM_TIMER, WNDCLASSW,
 };
 
 /// 焦点稳定后施加 IME 模式的一次性 timer。
@@ -33,6 +33,12 @@ pub const TIMER_APPLY: usize = 1;
 pub const TIMER_CAPS: usize = 2;
 /// 输入法切换（合成 Win+Space）后的校验循环 timer。
 pub const TIMER_SWITCH: usize = 3;
+/// 周期看门狗 timer：焦点不变时也会被 Shift/云输入等翻成英文，需定期扳回。
+pub const TIMER_WATCHDOG: usize = 4;
+
+/// 看门狗周期（毫秒）。apply 是幂等的（状态一致时不下发），轮询开销极小；
+/// 500ms 足以让「被翻成英文」的状态在感知不到的时间内被扳回。
+const WATCHDOG_MS: u32 = 500;
 
 fn main() {
     // 声明 Per-Monitor-V2 DPI 感知：必须在创建任何窗口之前调用，
@@ -64,6 +70,12 @@ fn main() {
 
     // 启动时先对当前前台施加一次。
     events::apply_for_foreground();
+
+    // 启动周期看门狗：锁定状态可能被 Shift/输入法自身行为翻转而无任何焦点事件，
+    // 定期回检确保锁得住。WM_TIMER 分支里不 KillTimer，timer 持续触发。
+    unsafe {
+        SetTimer(hidden, TIMER_WATCHDOG, WATCHDOG_MS, None);
+    }
 
     run_message_loop(tray.as_ref());
 
@@ -126,6 +138,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         let _ = KillTimer(hwnd, TIMER_SWITCH);
                     }
                     keyboard::on_switch_tick();
+                }
+                TIMER_WATCHDOG => {
+                    // 周期 timer，不 KillTimer。
+                    events::apply_for_foreground();
                 }
                 _ => {}
             }

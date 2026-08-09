@@ -14,7 +14,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, WH_KEYBOARD_LL, WM_INPUTLANGCHANGEREQUEST, WM_KEYDOWN,
     WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
-
 const VK_CAPITAL_U32: u32 = VK_CAPITAL.0 as u32;
 
 /// 直切后 / 兜底按键后回读校验的等待毫秒数。越短手感越快，但过短可能在系统尚未
@@ -268,6 +267,10 @@ pub fn on_switch_tick() {
             st.switch_goal = None;
             st.switch_remaining = 0;
         });
+        // 切换落定后强制施加一次锁定：微软拼音会记住上次的英文模式，
+        // 刚从英文切回中文输入法时往往仍是英文直输，必须当场扳回。
+        // 切到英文时 apply 自动 no-op。
+        crate::events::apply_for_foreground();
         return;
     }
 

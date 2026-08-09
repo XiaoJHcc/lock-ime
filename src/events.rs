@@ -6,8 +6,8 @@ use crate::TIMER_APPLY;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::WindowsAndMessaging::{
-    SetTimer, EVENT_OBJECT_FOCUS, EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT,
-    WINEVENT_SKIPOWNPROCESS,
+    GetWindowThreadProcessId, SetTimer, EVENT_OBJECT_FOCUS, EVENT_SYSTEM_FOREGROUND,
+    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
 };
 
 /// 安装焦点 + 前台切换两个 WinEvent hook。返回的句柄需在退出时 `uninstall`。
@@ -62,10 +62,60 @@ unsafe extern "system" fn win_event_proc(
     });
 }
 
-/// 对当前前台窗口施加 IME 模式锁定（由 WM_TIMER 调用）。
+/// 焦点控件是否为密码输入框（标准 EDIT 控件带 ES_PASSWORD 样式）。
+///
+/// 密码框必须放行：强制中文模式会让密码打出中文，且系统本就要求密码框走英文直输。
+/// 注：只能识别原生 Win32 EDIT 控件；浏览器/Electron 自绘的密码框识别不到。
+fn is_password_focus(hwnd: HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetGUIThreadInfo, GetWindowLongPtrW, GWL_STYLE, GUITHREADINFO,
+    };
+    const ES_PASSWORD: isize = 0x0020;
+
+    let tid = unsafe { GetWindowThreadProcessId(hwnd, None) };
+    if tid == 0 {
+        return false;
+    }
+    let mut info = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetGUIThreadInfo(tid, &mut info) }.is_err() {
+        return false;
+    }
+    let focus = info.hwndFocus;
+    if focus.is_invalid() || focus.0.is_null() {
+        return false;
+    }
+    let mut class = [0u16; 32];
+    let len = unsafe { GetClassNameW(focus, &mut class) };
+    if len <= 0 {
+        return false;
+    }
+    // 标准 EDIT 控件类名（ASCII，不区分大小写）。
+    let edit: [u16; 4] = [b'E' as u16, b'd' as u16, b'i' as u16, b't' as u16];
+    let is_edit = len as usize == edit.len()
+        && class[..4]
+            .iter()
+            .zip(edit.iter())
+            .all(|(a, b)| (*a as u8).to_ascii_lowercase() == (*b as u8).to_ascii_lowercase());
+    if !is_edit {
+        return false;
+    }
+    let style = unsafe { GetWindowLongPtrW(focus, GWL_STYLE) };
+    style & ES_PASSWORD != 0
+}
+
+/// 对当前前台窗口施加 IME 模式锁定（由 WM_TIMER / 切换校验循环 / 看门狗调用）。
+///
+/// 幂等：仅当当前状态与锁定目标不一致时才真正下发设置，周期轮询也不会打断输入。
 pub fn apply_for_foreground() {
     let hwnd = lang::foreground_window();
     if hwnd.is_invalid() {
+        return;
+    }
+    // 密码框不锁定，保持英文直输。
+    if is_password_focus(hwnd) {
         return;
     }
     let layout = lang::window_layout(hwnd);
