@@ -108,6 +108,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         if do_switch {
             let mode = crate::state::with(|st| st.config.capslock_switch_mode)
                 .unwrap_or(CapslockSwitchMode::CjkUs);
+            crate::logmsg!("caps short-press -> switch ({mode:?})");
             match mode {
                 CapslockSwitchMode::CjkUs => toggle_input_language(),
                 CapslockSwitchMode::Cycle => cycle_input_language(),
@@ -134,6 +135,7 @@ pub fn on_caps_longpress() {
     .unwrap_or(false);
 
     if should {
+        crate::logmsg!("caps long-press -> synth real CapsLock");
         synth_capslock();
         crate::state::with(|st| st.injecting = false);
     }
@@ -287,6 +289,7 @@ pub fn on_switch_tick() {
     .unwrap_or(false);
 
     if again {
+        crate::logmsg!("switch: direct did not take, fallback Win+Space");
         synth_win_space();
         let hidden = crate::state::with(|st| st.hidden_hwnd).unwrap_or_default();
         if !hidden.is_invalid() {

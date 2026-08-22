@@ -12,6 +12,7 @@ mod events;
 mod ime;
 mod keyboard;
 mod lang;
+mod log;
 mod settings_window;
 mod state;
 mod tray;
@@ -41,6 +42,9 @@ pub const TIMER_WATCHDOG: usize = 4;
 const WATCHDOG_MS: u32 = 500;
 
 fn main() {
+    log::install_panic_hook();
+    log::write("lock-ime starting");
+
     // 声明 Per-Monitor-V2 DPI 感知：必须在创建任何窗口之前调用，
     // 否则设置窗口会被系统位图拉伸，在高 DPI（如 4K 150%）下发虚。
     unsafe {
@@ -82,6 +86,7 @@ fn main() {
     // 清理。
     keyboard::uninstall(kbd_hook);
     events::uninstall(&win_hooks);
+    log::write("lock-ime exited cleanly");
 }
 
 /// 创建一个 message-only 隐藏窗口，用于接收 WM_TIMER。

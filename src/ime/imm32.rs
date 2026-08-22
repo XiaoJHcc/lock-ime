@@ -65,10 +65,12 @@ pub fn set_conversion_mode(hwnd: HWND, mode: u32) -> bool {
 pub fn ensure_chinese(hwnd: HWND) {
     if get_open_status(hwnd) != Some(true) {
         set_open_status(hwnd, true);
+        crate::logmsg!("zh: forced IME open (was closed)");
     }
     if let Some(mode) = get_conversion_mode(hwnd) {
         if (mode & crate::ime::IME_CMODE_NATIVE) == 0 {
             set_conversion_mode(hwnd, mode | crate::ime::IME_CMODE_NATIVE);
+            crate::logmsg!("zh: forced native mode (was 0x{mode:X})");
         }
     }
 }
@@ -78,8 +80,10 @@ pub fn ensure_japanese(hwnd: HWND, target_mode: u32) {
     // 日文场景下也需确保 IME 处于开状态，否则转换模式无意义。
     if get_open_status(hwnd) != Some(true) {
         set_open_status(hwnd, true);
+        crate::logmsg!("ja: forced IME open (was closed)");
     }
     if get_conversion_mode(hwnd) != Some(target_mode) {
         set_conversion_mode(hwnd, target_mode);
+        crate::logmsg!("ja: forced conversion mode 0x{target_mode:X}");
     }
 }
