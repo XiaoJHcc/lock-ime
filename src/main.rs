@@ -9,6 +9,7 @@
 mod autostart;
 mod config;
 mod events;
+mod flyout;
 mod ime;
 mod keyboard;
 mod lang;
@@ -69,6 +70,10 @@ fn main() {
     let win_hooks = events::install();
     let kbd_hook = keyboard::install();
 
+    // 浮窗需在托盘之前初始化：Tray::new 依据其可用性决定挂不挂原生菜单。
+    // 失败（未装 WindowsAppRuntime）时回退原生菜单，不影响主功能。
+    flyout::init();
+
     // 托盘必须在消息循环所在线程创建。
     let tray = tray::Tray::new();
 
@@ -78,7 +83,7 @@ fn main() {
     // 启动周期看门狗：锁定状态可能被 Shift/输入法自身行为翻转而无任何焦点事件，
     // 定期回检确保锁得住。WM_TIMER 分支里不 KillTimer，timer 持续触发。
     unsafe {
-        SetTimer(hidden, TIMER_WATCHDOG, WATCHDOG_MS, None);
+        SetTimer(Some(hidden), TIMER_WATCHDOG, WATCHDOG_MS, None);
     }
 
     run_message_loop(tray.as_ref());
@@ -113,9 +118,9 @@ fn create_hidden_window() -> Option<HWND> {
             0,
             0,
             0,
-            HWND_MESSAGE,
+            Some(HWND_MESSAGE),
             None,
-            hinstance,
+            Some(hinstance),
             None,
         )
         .ok()
@@ -128,19 +133,19 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             match wparam.0 {
                 TIMER_APPLY => {
                     unsafe {
-                        let _ = KillTimer(hwnd, TIMER_APPLY);
+                        let _ = KillTimer(Some(hwnd), TIMER_APPLY);
                     }
                     events::apply_for_foreground();
                 }
                 TIMER_CAPS => {
                     unsafe {
-                        let _ = KillTimer(hwnd, TIMER_CAPS);
+                        let _ = KillTimer(Some(hwnd), TIMER_CAPS);
                     }
                     keyboard::on_caps_longpress();
                 }
                 TIMER_SWITCH => {
                     unsafe {
-                        let _ = KillTimer(hwnd, TIMER_SWITCH);
+                        let _ = KillTimer(Some(hwnd), TIMER_SWITCH);
                     }
                     keyboard::on_switch_tick();
                 }
@@ -161,6 +166,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
 }
 
 fn run_message_loop(tray: Option<&tray::Tray>) {
+    use std::sync::atomic::Ordering;
     let mut msg = MSG::default();
     loop {
         let ret = unsafe { GetMessageW(&mut msg, None, 0, 0) };
@@ -172,18 +178,37 @@ fn run_message_loop(tray: Option<&tray::Tray>) {
             DispatchMessageW(&msg);
         }
 
-        // 处理托盘菜单事件。
+        // 托盘点击。两个 receiver 都是全局无界 channel，无论走哪条路径都要排空，
+        // 否则未消费的事件会一直堆着。
+        //
+        // 只认 Up：菜单弹出绑定在 Down，两个状态都响应会让一次点击触发两次。
+        // 浮窗不可用时 toggle_at 是空操作，此时托盘挂的是原生菜单，走下面的分支。
+        while let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
+            if let tray_icon::TrayIconEvent::Click {
+                rect,
+                button_state: tray_icon::MouseButtonState::Up,
+                ..
+            } = event
+            {
+                flyout::toggle_at(rect);
+            }
+        }
+
+        // 原生菜单事件（回退路径）。
         if let Some(tray) = tray {
             while let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
                 if tray.handle(&event.id) {
                     return; // 退出。
                 }
             }
-            if settings_window::NEED_REFRESH
-                .swap(false, std::sync::atomic::Ordering::Relaxed)
-            {
+        }
+
+        // 设置窗口改过配置：两处 UI 都要同步，与托盘是否建成无关。
+        if settings_window::NEED_REFRESH.swap(false, Ordering::Relaxed) {
+            if let Some(tray) = tray {
                 tray.refresh();
             }
+            flyout::refresh();
         }
     }
 }

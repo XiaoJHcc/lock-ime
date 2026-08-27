@@ -11,10 +11,12 @@ directories = "5"
 tray-icon = "0.19"
 
 [dependencies.windows]
-version = "0.58"
+version = "0.61"
 features = [
+    "Foundation",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_Ime",
     "Win32_UI_Input_KeyboardAndMouse",
@@ -26,6 +28,24 @@ features = [
     "Win32_System_Registry",
     "Win32_Globalization",
     "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+]
+
+# WinUI 3 投影：调用系统已装的 WindowsAppRuntime 框架包，不引入 .NET。
+# crates.io 上发布的 winio-winui3 0.4.5 缺 UI_Xaml_Hosting 等 feature，只能用 upstream。
+[dependencies.winui3]
+git = "https://github.com/compio-rs/winui3-rs"
+features = [
+    "UI_Input",
+    "UI_Xaml",
+    "UI_Xaml_Controls",
+    "UI_Xaml_Controls_Primitives",
+    "UI_Xaml_Media",
+    "UI_Xaml_Hosting",
+    "UI_Composition",
+    "UI_Dispatching",
+    "UI_Windowing",
+    "XamlApp",
 ]
 
 [build-dependencies]

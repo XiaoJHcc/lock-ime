@@ -6,7 +6,10 @@ use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{CreateFontW, DeleteObject, HGDIOBJ};
+use windows::Win32::Graphics::Gdi::{
+    CreateFontW, DeleteObject, CLEARTYPE_QUALITY, DEFAULT_CHARSET, FONT_CLIP_PRECISION,
+    FONT_OUTPUT_PRECISION, HGDIOBJ,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -98,7 +101,7 @@ pub fn open() {
                 470,
                 None,
                 None,
-                hinst,
+                Some(hinst),
                 None,
             ) {
                 c.set(Some(hwnd));
@@ -129,10 +132,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     0,
                     0,
                     0,
-                    1, // DEFAULT_CHARSET
-                    0,
-                    0,
-                    5, // CLEARTYPE_QUALITY
+                    DEFAULT_CHARSET,
+                    FONT_OUTPUT_PRECISION(0),
+                    FONT_CLIP_PRECISION(0),
+                    CLEARTYPE_QUALITY,
                     0,
                     w!("Microsoft YaHei UI"),
                 );
@@ -156,13 +159,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         s(y),
                         s(w),
                         s(h),
-                        hwnd,
-                        HMENU(id as usize as *mut _),
-                        hinst,
+                        Some(hwnd),
+                        Some(HMENU(id as usize as *mut _)),
+                        Some(hinst),
                         None,
                     )
                     .unwrap_or(HWND(null_mut()));
-                    let _ = SendMessageW(child, WM_SETFONT, WPARAM(hfont.0 as usize), LPARAM(1));
+                    let _ = SendMessageW(
+                        child,
+                        WM_SETFONT,
+                        Some(WPARAM(hfont.0 as usize)),
+                        Some(LPARAM(1)),
+                    );
                     child
                 };
 
@@ -279,19 +287,19 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
 
 fn is_checked(hwnd: HWND, id: i32) -> bool {
     unsafe {
-        let h = GetDlgItem(hwnd, id).unwrap_or(HWND(null_mut()));
-        SendMessageW(h, BM_GETCHECK, WPARAM(0), LPARAM(0)).0 as usize == BST_CHECKED
+        let h = GetDlgItem(Some(hwnd), id).unwrap_or(HWND(null_mut()));
+        SendMessageW(h, BM_GETCHECK, Some(WPARAM(0)), Some(LPARAM(0))).0 as usize == BST_CHECKED
     }
 }
 
 fn set_checked(hwnd: HWND, id: i32, v: bool) {
     unsafe {
-        let h = GetDlgItem(hwnd, id).unwrap_or(HWND(null_mut()));
+        let h = GetDlgItem(Some(hwnd), id).unwrap_or(HWND(null_mut()));
         let _ = SendMessageW(
             h,
             BM_SETCHECK,
-            WPARAM(if v { BST_CHECKED } else { BST_UNCHECKED }),
-            LPARAM(0),
+            Some(WPARAM(if v { BST_CHECKED } else { BST_UNCHECKED })),
+            Some(LPARAM(0)),
         );
     }
 }
@@ -333,7 +341,7 @@ fn load_config_to_controls(hwnd: HWND) {
     );
 
     unsafe {
-        if let Ok(h) = GetDlgItem(hwnd, ID_EDIT_LP) {
+        if let Ok(h) = GetDlgItem(Some(hwnd), ID_EDIT_LP) {
             let s = HSTRING::from(lp.to_string());
             let _ = SetWindowTextW(h, PCWSTR(s.as_ptr()));
         }
@@ -358,7 +366,7 @@ fn apply_controls(hwnd: HWND) -> bool {
         CapslockSwitchMode::CjkUs
     };
     let lp = unsafe {
-        let h = GetDlgItem(hwnd, ID_EDIT_LP).unwrap_or(HWND(null_mut()));
+        let h = GetDlgItem(Some(hwnd), ID_EDIT_LP).unwrap_or(HWND(null_mut()));
         let mut buf = [0u16; 32];
         let n = GetWindowTextW(h, &mut buf[..]);
         let s = String::from_utf16_lossy(&buf[..n.max(0) as usize]);

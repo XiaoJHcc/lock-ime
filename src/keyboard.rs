@@ -83,7 +83,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         if let Some(ms) = longpress_ms {
             if !hidden.is_invalid() {
                 unsafe {
-                    SetTimer(hidden, TIMER_CAPS, ms as u32, None);
+                    SetTimer(Some(hidden), TIMER_CAPS, ms as u32, None);
                 }
             }
         }
@@ -94,7 +94,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     if is_up {
         if !hidden.is_invalid() {
             unsafe {
-                let _ = KillTimer(hidden, TIMER_CAPS);
+                let _ = KillTimer(Some(hidden), TIMER_CAPS);
             }
         }
         let do_switch = crate::state::with(|st| {
@@ -223,7 +223,7 @@ fn activate_layout_direct(hkl: HKL) {
     }
     unsafe {
         let _ = PostMessageW(
-            hwnd,
+            Some(hwnd),
             WM_INPUTLANGCHANGEREQUEST,
             WPARAM(0),
             LPARAM(hkl.0 as isize),
@@ -252,7 +252,7 @@ fn begin_switch(goal: SwitchGoal, direct: Option<HKL>, budget: u8) {
     if !hidden.is_invalid() {
         // 给系统一点时间完成直切后再回读校验。
         unsafe {
-            SetTimer(hidden, crate::TIMER_SWITCH, SWITCH_VERIFY_MS, None);
+            SetTimer(Some(hidden), crate::TIMER_SWITCH, SWITCH_VERIFY_MS, None);
         }
     }
 }
@@ -294,7 +294,7 @@ pub fn on_switch_tick() {
         let hidden = crate::state::with(|st| st.hidden_hwnd).unwrap_or_default();
         if !hidden.is_invalid() {
             unsafe {
-                SetTimer(hidden, crate::TIMER_SWITCH, SWITCH_VERIFY_MS, None);
+                SetTimer(Some(hidden), crate::TIMER_SWITCH, SWITCH_VERIFY_MS, None);
             }
         }
     }

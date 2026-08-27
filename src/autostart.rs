@@ -23,7 +23,7 @@ fn open_run_key() -> Option<HKEY> {
         RegOpenKeyExW(
             HKEY_CURRENT_USER,
             PCWSTR(subkey.as_ptr()),
-            0,
+            None,
             KEY_SET_VALUE,
             &mut hkey,
         )
@@ -57,7 +57,7 @@ pub fn set_autostart(enabled: bool) -> bool {
             std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2)
         };
         let rc = unsafe {
-            RegSetValueExW(hkey, PCWSTR(name.as_ptr()), 0, REG_SZ, Some(bytes))
+            RegSetValueExW(hkey, PCWSTR(name.as_ptr()), None, REG_SZ, Some(bytes))
         };
         rc == ERROR_SUCCESS
     } else {

@@ -7,6 +7,12 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 pub struct Tray {
     _tray: TrayIcon,
+    /// 原生菜单，仅在浮窗不可用时创建；可用时托盘不挂菜单，右键也交给浮窗。
+    menu: Option<NativeMenu>,
+}
+
+/// 回退路径用的原生菜单及其条目。
+struct NativeMenu {
     _menu: Menu,
     chinese: CheckMenuItem,
     japanese: CheckMenuItem,
@@ -34,8 +40,42 @@ fn make_icon() -> Option<Icon> {
 }
 
 impl Tray {
-    /// 依据当前配置创建托盘。
+    /// 依据当前配置创建托盘。浮窗可用时不建原生菜单。
     pub fn new() -> Option<Tray> {
+        let mut builder = TrayIconBuilder::new().with_tooltip("lock-ime");
+        if let Some(icon) = make_icon() {
+            builder = builder.with_icon(icon);
+        }
+
+        // 挂了菜单，右键会被 tray-icon 的 TrackPopupMenu 抢先接管，收不到
+        // TrayIconEvent；不挂则左右键都只发事件，由主循环转给浮窗。
+        let menu = if crate::flyout::is_available() {
+            builder = builder.with_menu_on_left_click(false);
+            None
+        } else {
+            let m = NativeMenu::new()?;
+            builder = builder.with_menu(Box::new(m._menu.clone()));
+            Some(m)
+        };
+
+        Some(Tray { _tray: builder.build().ok()?, menu })
+    }
+
+    /// 从当前配置同步菜单勾选状态与日文标签。浮窗路径下无菜单可同步。
+    pub fn refresh(&self) {
+        if let Some(m) = &self.menu {
+            m.refresh();
+        }
+    }
+
+    /// 处理一次原生菜单事件。返回 true 表示请求退出程序。
+    pub fn handle(&self, id: &MenuId) -> bool {
+        self.menu.as_ref().is_some_and(|m| m.handle(id))
+    }
+}
+
+impl NativeMenu {
+    fn new() -> Option<NativeMenu> {
         let (cn, ja, caps, auto, ja_mode) = crate::state::with(|st| {
             (
                 st.config.chinese_lock_enabled,
@@ -63,16 +103,7 @@ impl Tray {
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&quit);
 
-        let mut builder = TrayIconBuilder::new()
-            .with_menu(Box::new(menu.clone()))
-            .with_tooltip("lock-ime");
-        if let Some(icon) = make_icon() {
-            builder = builder.with_icon(icon);
-        }
-        let tray = builder.build().ok()?;
-
-        Some(Tray {
-            _tray: tray,
+        Some(NativeMenu {
             _menu: menu,
             chinese,
             japanese,
@@ -83,8 +114,7 @@ impl Tray {
         })
     }
 
-    /// 从当前配置同步菜单勾选状态与日文标签。
-    pub fn refresh(&self) {
+    fn refresh(&self) {
         let (cn, ja, caps, auto, ja_mode) = crate::state::with(|st| {
             (
                 st.config.chinese_lock_enabled,
@@ -102,8 +132,7 @@ impl Tray {
         self.autostart.set_checked(auto);
     }
 
-    /// 处理一次菜单事件。返回 true 表示请求退出程序。
-    pub fn handle(&self, id: &MenuId) -> bool {
+    fn handle(&self, id: &MenuId) -> bool {
         if id == self.quit.id() {
             return true;
         }

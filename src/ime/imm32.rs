@@ -22,7 +22,7 @@ fn ime_window(hwnd: HWND) -> Option<HWND> {
 }
 
 fn ime_control(ime: HWND, cmd: usize, value: isize) -> isize {
-    unsafe { SendMessageW(ime, WM_IME_CONTROL, WPARAM(cmd), LPARAM(value)).0 }
+    unsafe { SendMessageW(ime, WM_IME_CONTROL, Some(WPARAM(cmd)), Some(LPARAM(value))).0 }
 }
 
 /// 读取开关状态（true = 开 = 中文）。

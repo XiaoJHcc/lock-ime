@@ -56,7 +56,7 @@ unsafe extern "system" fn win_event_proc(
         if !st.hidden_hwnd.is_invalid() {
             // 同一 timer id 重复 SetTimer 会重置计时，天然合并连续焦点事件。
             unsafe {
-                SetTimer(st.hidden_hwnd, TIMER_APPLY, 60, None);
+                SetTimer(Some(st.hidden_hwnd), TIMER_APPLY, 60, None);
             }
         }
     });
