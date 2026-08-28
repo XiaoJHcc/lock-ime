@@ -22,20 +22,30 @@ impl Default for JapaneseMode {
     }
 }
 
-/// CapsLock 短按的切换表现。
+/// CapsLock 短按/长按的动作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CapslockSwitchMode {
+pub enum CapslockAction {
     /// CJK ↔ 英文 二态切换。
     CjkUs,
     /// 顺序循环切换（等同 Win+Space）。
     Cycle,
+    /// 大写锁定（合成一次真正的 CapsLock，即系统默认行为）。
+    CapsLock,
 }
 
-impl Default for CapslockSwitchMode {
+impl Default for CapslockAction {
     fn default() -> Self {
-        CapslockSwitchMode::CjkUs
+        CapslockAction::CjkUs
     }
+}
+
+/// 旧配置中 CapsLock 短按的切换表现。**仅供迁移旧配置反序列化**，新代码用 `CapslockAction`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapslockSwitchMode {
+    CjkUs,
+    Cycle,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,14 +57,20 @@ pub struct Config {
     pub japanese_lock_enabled: bool,
     /// 日文锁定的目标模式。
     pub japanese_mode: JapaneseMode,
-    /// 功能#3：CapsLock 短按切换输入法。
-    pub capslock_switch_enabled: bool,
-    /// CapsLock 短按的切换表现。
-    pub capslock_switch_mode: CapslockSwitchMode,
-    /// CapsLock 长按多少毫秒判定为「锁大写」。
+    /// 功能#3：CapsLock 短按动作。
+    pub capslock_short_action: CapslockAction,
+    /// CapsLock 长按动作。
+    pub capslock_long_action: CapslockAction,
+    /// CapsLock 长按多少毫秒判定为长按。
     pub capslock_longpress_ms: u64,
     /// 开机自启。
     pub autostart: bool,
+    /// 旧配置迁移用，仅反序列化；落盘时不写回。
+    #[serde(skip_serializing)]
+    capslock_switch_enabled: Option<bool>,
+    /// 旧配置迁移用，仅反序列化；落盘时不写回。
+    #[serde(skip_serializing)]
+    capslock_switch_mode: Option<CapslockSwitchMode>,
 }
 
 impl Default for Config {
@@ -63,10 +79,12 @@ impl Default for Config {
             chinese_lock_enabled: true,
             japanese_lock_enabled: true,
             japanese_mode: JapaneseMode::Hiragana,
-            capslock_switch_enabled: true,
-            capslock_switch_mode: CapslockSwitchMode::CjkUs,
+            capslock_short_action: CapslockAction::CjkUs,
+            capslock_long_action: CapslockAction::CapsLock,
             capslock_longpress_ms: 300,
             autostart: false,
+            capslock_switch_enabled: None,
+            capslock_switch_mode: None,
         }
     }
 }
@@ -85,17 +103,54 @@ impl Config {
     pub fn load() -> Config {
         let path = Self::path();
         match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).unwrap_or_else(|_| {
-                let cfg = Config::default();
-                let _ = cfg.save();
-                cfg
-            }),
+            Ok(text) => toml::from_str(&text)
+                .map(|cfg| Self::migrate(cfg))
+                .unwrap_or_else(|_| {
+                    let cfg = Config::default();
+                    let _ = cfg.save();
+                    cfg
+                }),
             Err(_) => {
                 let cfg = Config::default();
                 let _ = cfg.save();
                 cfg
             }
         }
+    }
+
+    /// CapsLock 功能是否生效：短按与长按都是「大写锁定」时等同系统默认行为，无需拦截。
+    pub fn capslock_active(&self) -> bool {
+        !(self.capslock_short_action == CapslockAction::CapsLock
+            && self.capslock_long_action == CapslockAction::CapsLock)
+    }
+
+    /// 旧配置（capslock_switch_enabled/mode）迁移到 short/long 动作字段，并落盘一次。
+    ///
+    /// 旧字段只会出现在旧版本写出的文件里（新版本序列化时已跳过），故文件里出现旧字段
+    /// 即可断定新字段缺席、正在使用默认值，直接按旧语义覆盖：
+    /// enabled=true → 短按=旧 mode、长按=大写锁定；enabled=false → 两者皆大写锁定。
+    fn migrate(mut cfg: Config) -> Config {
+        let legacy = match (cfg.capslock_switch_enabled, cfg.capslock_switch_mode) {
+            (Some(enabled), mode) => Some((enabled, mode.unwrap_or(CapslockSwitchMode::CjkUs))),
+            (None, Some(mode)) => Some((true, mode)),
+            (None, None) => None,
+        };
+        if let Some((enabled, mode)) = legacy {
+            if enabled {
+                cfg.capslock_short_action = match mode {
+                    CapslockSwitchMode::CjkUs => CapslockAction::CjkUs,
+                    CapslockSwitchMode::Cycle => CapslockAction::Cycle,
+                };
+                cfg.capslock_long_action = CapslockAction::CapsLock;
+            } else {
+                cfg.capslock_short_action = CapslockAction::CapsLock;
+                cfg.capslock_long_action = CapslockAction::CapsLock;
+            }
+            cfg.capslock_switch_enabled = None;
+            cfg.capslock_switch_mode = None;
+            let _ = cfg.save();
+        }
+        cfg
     }
 
     /// 保存配置到磁盘。

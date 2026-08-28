@@ -1,7 +1,7 @@
 //! 系统托盘图标与菜单。
 
 use crate::autostart;
-use crate::config::JapaneseMode;
+use crate::config::{CapslockAction, JapaneseMode};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
@@ -80,7 +80,7 @@ impl NativeMenu {
             (
                 st.config.chinese_lock_enabled,
                 st.config.japanese_lock_enabled,
-                st.config.capslock_switch_enabled,
+                st.config.capslock_active(),
                 st.config.autostart,
                 st.config.japanese_mode,
             )
@@ -119,7 +119,7 @@ impl NativeMenu {
             (
                 st.config.chinese_lock_enabled,
                 st.config.japanese_lock_enabled,
-                st.config.capslock_switch_enabled,
+                st.config.capslock_active(),
                 st.config.autostart,
                 st.config.japanese_mode,
             )
@@ -156,7 +156,16 @@ impl NativeMenu {
         } else if id == self.capslock.id() {
             let v = self.capslock.is_checked();
             crate::state::with(|st| {
-                st.config.capslock_switch_enabled = v;
+                // 菜单项只有开/关两态，对短按/长按双动作是有损映射：
+                // 开 = 恢复默认（短按 CJK/US、长按大写锁定），关 = 两者皆大写锁定
+                // （等同系统默认行为）。精细配置走设置窗口或配置文件。
+                let (short, long) = if v {
+                    (CapslockAction::CjkUs, CapslockAction::CapsLock)
+                } else {
+                    (CapslockAction::CapsLock, CapslockAction::CapsLock)
+                };
+                st.config.capslock_short_action = short;
+                st.config.capslock_long_action = long;
                 let _ = st.config.save();
             });
         } else if id == self.autostart.id() {

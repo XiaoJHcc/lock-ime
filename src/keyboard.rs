@@ -1,6 +1,6 @@
 //! 低级键盘 hook：CapsLock 短按切输入法、长按锁大写（功能 #3）。
 
-use crate::config::CapslockSwitchMode;
+use crate::config::CapslockAction;
 use crate::lang;
 use crate::state::SwitchGoal;
 use crate::TIMER_CAPS;
@@ -54,7 +54,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
 
     // 读取开关与自注入标志。
     let (enabled, injecting) = crate::state::with(|st| {
-        (st.config.capslock_switch_enabled, st.injecting)
+        (st.config.capslock_active(), st.injecting)
     })
     .unwrap_or((false, false));
 
@@ -106,13 +106,10 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         .unwrap_or(false);
 
         if do_switch {
-            let mode = crate::state::with(|st| st.config.capslock_switch_mode)
-                .unwrap_or(CapslockSwitchMode::CjkUs);
-            crate::logmsg!("caps short-press -> switch ({mode:?})");
-            match mode {
-                CapslockSwitchMode::CjkUs => toggle_input_language(),
-                CapslockSwitchMode::Cycle => cycle_input_language(),
-            }
+            let action =
+                crate::state::with(|st| st.config.capslock_short_action).unwrap_or_default();
+            crate::logmsg!("caps short-press -> {action:?}");
+            run_action(action);
         }
         // 吞掉物理 CapsLock 抬起。
         return LRESULT(1);
@@ -121,7 +118,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
-/// 长按计时到点（在 wndproc 的 WM_TIMER 中调用）：合成一次真正的 CapsLock 按键以翻转大写状态。
+/// 长按计时到点（在 wndproc 的 WM_TIMER 中调用）：执行配置的长按动作。
 pub fn on_caps_longpress() {
     let should = crate::state::with(|st| {
         if st.caps_pending && !st.caps_consumed {
@@ -135,9 +132,20 @@ pub fn on_caps_longpress() {
     .unwrap_or(false);
 
     if should {
-        crate::logmsg!("caps long-press -> synth real CapsLock");
-        synth_capslock();
+        let action = crate::state::with(|st| st.config.capslock_long_action)
+            .unwrap_or(CapslockAction::CapsLock);
+        crate::logmsg!("caps long-press -> {action:?}");
+        run_action(action);
         crate::state::with(|st| st.injecting = false);
+    }
+}
+
+/// 执行一次 CapsLock 动作。
+fn run_action(action: CapslockAction) {
+    match action {
+        CapslockAction::CapsLock => synth_capslock(),
+        CapslockAction::CjkUs => toggle_input_language(),
+        CapslockAction::Cycle => cycle_input_language(),
     }
 }
 

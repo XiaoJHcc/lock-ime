@@ -121,14 +121,26 @@ pub fn apply_for_foreground() {
     let layout = lang::window_layout(hwnd);
     let language = lang::primary_lang(layout);
 
-    crate::state::with(|st| match language {
-        lang::LANG_ZH_CN if st.config.chinese_lock_enabled => {
-            imm32::ensure_chinese(hwnd);
-        }
-        lang::LANG_JA if st.config.japanese_lock_enabled => {
-            let mode = ime::japanese_conversion_mode(st.config.japanese_mode);
-            imm32::ensure_japanese(hwnd, mode);
-        }
-        _ => {}
-    });
+    // 锁内只取配置、立即还锁：ensure_* 会向目标线程的 IME 窗口 SendMessage，
+    // 跨线程等待期间本线程会重入处理待发消息（键盘 hook / 定时器回调等），
+    // 若借用还在手上，再次 state::with 即双重 borrow_mut 直接 panic
+    // （日志中实测出现过 RefCell already borrowed 崩溃）。
+    enum Lock {
+        Chinese,
+        Japanese(u32),
+    }
+    let job = crate::state::with(|st| match language {
+        lang::LANG_ZH_CN if st.config.chinese_lock_enabled => Some(Lock::Chinese),
+        lang::LANG_JA if st.config.japanese_lock_enabled => Some(Lock::Japanese(
+            ime::japanese_conversion_mode(st.config.japanese_mode),
+        )),
+        _ => None,
+    })
+    .flatten();
+
+    match job {
+        Some(Lock::Chinese) => imm32::ensure_chinese(hwnd),
+        Some(Lock::Japanese(mode)) => imm32::ensure_japanese(hwnd, mode),
+        None => {}
+    }
 }

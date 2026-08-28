@@ -1,6 +1,6 @@
 //! 设置窗口：用 Win32 原生控件做一个简单的设置页面。
 
-use crate::config::{CapslockSwitchMode, JapaneseMode};
+use crate::config::{CapslockAction, JapaneseMode};
 use std::cell::Cell;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -49,7 +49,6 @@ const BN_CLICKED: u16 = 0;
 
 const ID_CHK_CN: i32 = 1001;
 const ID_CHK_JA: i32 = 1002;
-const ID_CHK_CAPS: i32 = 1003;
 const ID_CHK_AUTO: i32 = 1004;
 const ID_RAD_HIRA: i32 = 1005;
 const ID_RAD_KATA: i32 = 1006;
@@ -57,8 +56,23 @@ const ID_RAD_FULL: i32 = 1007;
 const ID_EDIT_LP: i32 = 1008;
 const ID_BTN_OK: i32 = 1009;
 const ID_BTN_CANCEL: i32 = 1010;
-const ID_RAD_CJKUS: i32 = 1011;
-const ID_RAD_CYCLE: i32 = 1012;
+const ID_CMB_SHORT: i32 = 1011;
+const ID_CMB_LONG: i32 = 1012;
+
+// 组合框风格与消息。
+const CBS_DROPDOWNLIST: u32 = 0x0003;
+const CBS_HASSTRINGS: u32 = 0x0200;
+const WS_VSCROLL: u32 = 0x00200000;
+const CB_ADDSTRING: u32 = 0x0143;
+const CB_SETCURSEL: u32 = 0x014E;
+const CB_GETCURSEL: u32 = 0x0147;
+
+/// CapsLock 动作下拉框的三个选项，下标与 `CapslockAction` 一一对应。
+const CAPS_ACTIONS: [(&str, CapslockAction); 3] = [
+    ("CJK / US 切换", CapslockAction::CjkUs),
+    ("正常循环", CapslockAction::Cycle),
+    ("大写锁定", CapslockAction::CapsLock),
+];
 
 thread_local! {
     static WND: Cell<Option<HWND>> = const { Cell::new(None) };
@@ -198,15 +212,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 make(w!("BUTTON"), w!("片假名"), ctl(BS_AUTORADIOBUTTON), RX + 108, 128, 100, 20, ID_RAD_KATA);
                 make(w!("BUTTON"), w!("全角英数"), ctl(BS_AUTORADIOBUTTON), RX + 216, 128, 100, 20, ID_RAD_FULL);
 
-                // 区3：CapsLock
+                // 区3：CapsLock —— 短按/长按动作下拉框 + 长按阈值。
                 make(w!("BUTTON"), w!("CapsLock"), btn(BS_GROUPBOX), GX, 182, GW, 128, 1000);
-                make(w!("BUTTON"), w!("短按切换输入法"), btn(BS_AUTOCHECKBOX), CX, 206, CW_, 20, ID_CHK_CAPS);
-                // 切换表现两选一。
-                make(w!("BUTTON"), w!("CJK / US 切换"), ctl(BS_AUTORADIOBUTTON | WS_GROUP), RX, 238, 150, 20, ID_RAD_CJKUS);
-                make(w!("BUTTON"), w!("正常循环"), ctl(BS_AUTORADIOBUTTON), RX + 160, 238, 150, 20, ID_RAD_CYCLE);
+                make(w!("STATIC"), w!("短按"), btn(SS_LEFT), RX, 209, 60, 20, 1000);
+                // 组合框高度含下拉展开区，200 只是给下拉留的空间。
+                make(w!("COMBOBOX"), w!(""), ctl(CBS_DROPDOWNLIST | CBS_HASSTRINGS | WS_VSCROLL), RX + 64, 206, 160, 200, ID_CMB_SHORT);
+                make(w!("STATIC"), w!("长按"), btn(SS_LEFT), RX, 241, 60, 20, 1000);
+                make(w!("COMBOBOX"), w!(""), ctl(CBS_DROPDOWNLIST | CBS_HASSTRINGS | WS_VSCROLL), RX + 64, 238, 160, 200, ID_CMB_LONG);
                 // 长按阈值：标签与输入框同一行、垂直居中对齐。
-                make(w!("STATIC"), w!("长按大写锁定 阈值（毫秒）"), btn(SS_LEFT), RX, 276, 190, 20, 1000);
-                make(w!("EDIT"), w!("300"), ctl(WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER), RX + 194, 274, 70, 24, ID_EDIT_LP);
+                make(w!("STATIC"), w!("长按阈值（毫秒）"), btn(SS_LEFT), RX, 276, 120, 20, 1000);
+                make(w!("EDIT"), w!("300"), ctl(WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER), RX + 124, 274, 70, 24, ID_EDIT_LP);
+                fill_action_combo(hwnd, ID_CMB_SHORT);
+                fill_action_combo(hwnd, ID_CMB_LONG);
 
                 // 区4：开机自启
                 make(w!("BUTTON"), w!("开机自启"), btn(BS_GROUPBOX), GX, 320, GW, 52, 1000);
@@ -305,14 +322,14 @@ fn set_checked(hwnd: HWND, id: i32, v: bool) {
 }
 
 fn load_config_to_controls(hwnd: HWND) {
-    let (cn, ja, caps, auto, mode, caps_mode, lp) = crate::state::with(|st| {
+    let (cn, ja, auto, mode, short, long, lp) = crate::state::with(|st| {
         (
             st.config.chinese_lock_enabled,
             st.config.japanese_lock_enabled,
-            st.config.capslock_switch_enabled,
             st.config.autostart,
             st.config.japanese_mode,
-            st.config.capslock_switch_mode,
+            st.config.capslock_short_action,
+            st.config.capslock_long_action,
             st.config.capslock_longpress_ms,
         )
     })
@@ -320,7 +337,6 @@ fn load_config_to_controls(hwnd: HWND) {
 
     set_checked(hwnd, ID_CHK_CN, cn);
     set_checked(hwnd, ID_CHK_JA, ja);
-    set_checked(hwnd, ID_CHK_CAPS, caps);
     set_checked(hwnd, ID_CHK_AUTO, auto);
     set_checked(
         hwnd,
@@ -331,14 +347,8 @@ fn load_config_to_controls(hwnd: HWND) {
         },
         true,
     );
-    set_checked(
-        hwnd,
-        match caps_mode {
-            CapslockSwitchMode::CjkUs => ID_RAD_CJKUS,
-            CapslockSwitchMode::Cycle => ID_RAD_CYCLE,
-        },
-        true,
-    );
+    set_combo_action(hwnd, ID_CMB_SHORT, short);
+    set_combo_action(hwnd, ID_CMB_LONG, long);
 
     unsafe {
         if let Ok(h) = GetDlgItem(Some(hwnd), ID_EDIT_LP) {
@@ -351,7 +361,6 @@ fn load_config_to_controls(hwnd: HWND) {
 fn apply_controls(hwnd: HWND) -> bool {
     let cn = is_checked(hwnd, ID_CHK_CN);
     let ja = is_checked(hwnd, ID_CHK_JA);
-    let caps = is_checked(hwnd, ID_CHK_CAPS);
     let auto = is_checked(hwnd, ID_CHK_AUTO);
     let mode = if is_checked(hwnd, ID_RAD_HIRA) {
         JapaneseMode::Hiragana
@@ -360,11 +369,8 @@ fn apply_controls(hwnd: HWND) -> bool {
     } else {
         JapaneseMode::FullWidthAlnum
     };
-    let caps_mode = if is_checked(hwnd, ID_RAD_CYCLE) {
-        CapslockSwitchMode::Cycle
-    } else {
-        CapslockSwitchMode::CjkUs
-    };
+    let short = combo_action(hwnd, ID_CMB_SHORT);
+    let long = combo_action(hwnd, ID_CMB_LONG);
     let lp = unsafe {
         let h = GetDlgItem(Some(hwnd), ID_EDIT_LP).unwrap_or(HWND(null_mut()));
         let mut buf = [0u16; 32];
@@ -378,12 +384,55 @@ fn apply_controls(hwnd: HWND) -> bool {
         st.config.chinese_lock_enabled = cn;
         st.config.japanese_lock_enabled = ja;
         st.config.japanese_mode = mode;
-        st.config.capslock_switch_enabled = caps;
-        st.config.capslock_switch_mode = caps_mode;
+        st.config.capslock_short_action = short;
+        st.config.capslock_long_action = long;
         st.config.capslock_longpress_ms = lp;
         st.config.autostart = auto;
         let _ = st.config.save();
     });
     NEED_REFRESH.store(true, Ordering::Relaxed);
     true
+}
+
+/// 向动作组合框填充三个选项。
+fn fill_action_combo(hwnd: HWND, id: i32) {
+    unsafe {
+        if let Ok(h) = GetDlgItem(Some(hwnd), id) {
+            for (text, _) in CAPS_ACTIONS {
+                let s = HSTRING::from(text);
+                let _ = SendMessageW(
+                    h,
+                    CB_ADDSTRING,
+                    Some(WPARAM(0)),
+                    Some(LPARAM(s.as_ptr() as isize)),
+                );
+            }
+        }
+    }
+}
+
+/// 按动作设置组合框选中项。
+fn set_combo_action(hwnd: HWND, id: i32, action: CapslockAction) {
+    let idx = CAPS_ACTIONS
+        .iter()
+        .position(|(_, a)| *a == action)
+        .unwrap_or(0);
+    unsafe {
+        if let Ok(h) = GetDlgItem(Some(hwnd), id) {
+            let _ = SendMessageW(h, CB_SETCURSEL, Some(WPARAM(idx)), Some(LPARAM(0)));
+        }
+    }
+}
+
+/// 读取组合框当前选中的动作。
+fn combo_action(hwnd: HWND, id: i32) -> CapslockAction {
+    let idx = unsafe {
+        GetDlgItem(Some(hwnd), id)
+            .map(|h| SendMessageW(h, CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0))).0)
+            .unwrap_or(0)
+    };
+    CAPS_ACTIONS
+        .get(idx.max(0) as usize)
+        .map(|(_, a)| *a)
+        .unwrap_or_default()
 }

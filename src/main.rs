@@ -37,6 +37,8 @@ pub const TIMER_CAPS: usize = 2;
 pub const TIMER_SWITCH: usize = 3;
 /// 周期看门狗 timer：焦点不变时也会被 Shift/云输入等翻成英文，需定期扳回。
 pub const TIMER_WATCHDOG: usize = 4;
+/// 浮窗收起动画落定后收缩窗口的一次性 timer（见 flyout::on_expand_state）。
+pub const TIMER_FLYOUT_ANIM: usize = 5;
 
 /// 看门狗周期（毫秒）。apply 是幂等的（状态一致时不下发），轮询开销极小；
 /// 500ms 足以让「被翻成英文」的状态在感知不到的时间内被扳回。
@@ -73,6 +75,23 @@ fn main() {
     // 浮窗需在托盘之前初始化：Tray::new 依据其可用性决定挂不挂原生菜单。
     // 失败（未装 WindowsAppRuntime）时回退原生菜单，不影响主功能。
     flyout::init();
+
+    // 调试钩子：置 LOCK_IME_DEBUG_FLYOUT 时启动后立即弹出浮窗（截图校对布局用）。
+    // 锚点取屏幕右下角附近，模拟真实托盘位置（原点在屏幕顶部会被工作区钳制，
+    // 底边锚定几何不成立，无法验证展开动画的「卡片钉住」效果）。
+    #[cfg(debug_assertions)]
+    if std::env::var_os("LOCK_IME_DEBUG_FLYOUT").is_some() {
+        flyout::toggle_at(tray_icon::Rect {
+            position: tray_icon::dpi::PhysicalPosition {
+                x: 1600.0,
+                y: 1100.0,
+            },
+            size: tray_icon::dpi::PhysicalSize {
+                width: 24,
+                height: 24,
+            },
+        });
+    }
 
     // 托盘必须在消息循环所在线程创建。
     let tray = tray::Tray::new();
@@ -152,6 +171,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 TIMER_WATCHDOG => {
                     // 周期 timer，不 KillTimer。
                     events::apply_for_foreground();
+                }
+                TIMER_FLYOUT_ANIM => {
+                    // 周期 timer，动画播完由 flyout 自行 KillTimer。
+                    flyout::on_anim_tick();
                 }
                 _ => {}
             }
