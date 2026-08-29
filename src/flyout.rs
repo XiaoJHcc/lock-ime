@@ -29,7 +29,7 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, GetClientRect, KillTimer, PostQuitMessage, SetForegroundWindow,
+    EnumChildWindows, GetClientRect, KillTimer, SetForegroundWindow,
     SetTimer, SetWindowPos, SystemParametersInfoW, SPI_GETWORKAREA, PostMessageW,
     SWP_NOACTIVATE, SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE,
     WM_ACTIVATE, WM_USER,
@@ -70,7 +70,7 @@ const PANEL_W: i32 = 320;
 const ROW_H: i32 = 40;
 /// 卡片上下内边距各 10，见 make_card。
 const CARD_PAD_V: i32 = 10;
-/// 普通单行卡片总高（中文锁定/开机自启）：行高 + 上下内边距 + 上下 1px 描边。
+/// 普通单行卡片总高（中文锁定/日文锁定）：行高 + 上下内边距 + 上下 1px 描边。
 /// 描边在内边距外侧（Border 的 Padding 不含 BorderThickness），漏算它会让面板偏矮、
 /// 最下面一张卡的底边描边被窗口下缘裁掉。
 const CARD_H: i32 = CARD_PAD_V * 2 + ROW_H + 2;
@@ -98,10 +98,10 @@ const SEP_H: i32 = 1;
 /// 面板高度 = 内容区 + 分隔线 + 底栏。`expanded` 为 CapsLock 卡片展开与否。
 ///
 /// CapsLock 卡折叠态与普通卡片同为 CARD_H（头部 MinHeight 含自身描边，见
-/// make_caps_card），故直接按四张 CARD_H 累加。
+/// make_caps_card），故直接按三张 CARD_H 累加。
 const fn panel_h(expanded: bool) -> i32 {
     let caps = CARD_H + if expanded { EXPANDED_H } else { 0 };
-    CONTENT_PAD_V * 2 + TITLE_H + CARD_GAP * 4 + CARD_H * 3 + caps + SEP_H + FOOTER_H
+    CONTENT_PAD_V * 2 + TITLE_H + CARD_GAP * 3 + CARD_H * 2 + caps + SEP_H + FOOTER_H
 }
 /// 面板与托盘图标之间的间距（逻辑像素）。
 const GAP: i32 = 8;
@@ -161,7 +161,6 @@ struct Items {
     caps_short: ComboBox,
     caps_long: ComboBox,
     threshold_slider: Slider,
-    autostart: ToggleSwitch,
 }
 
 impl Items {
@@ -172,12 +171,11 @@ impl Items {
     /// 否则 SetIsOn/SetSelectedIndex 触发的 Toggled/SelectionChanged 会把刚读出来的值
     /// 又写回配置（无害但落盘一次）。
     fn sync(&self) {
-        let Some((cn, ja, ja_mode, auto, short, long, lp)) = crate::state::with(|st| {
+        let Some((cn, ja, ja_mode, short, long, lp)) = crate::state::with(|st| {
             (
                 st.config.chinese_lock_enabled,
                 st.config.japanese_lock_enabled,
                 st.config.japanese_mode,
-                st.config.autostart,
                 st.config.capslock_short_action,
                 st.config.capslock_long_action,
                 st.config.capslock_longpress_ms,
@@ -192,7 +190,6 @@ impl Items {
             let _ = self.caps_short.SetSelectedIndex(action_index(short));
             let _ = self.caps_long.SetSelectedIndex(action_index(long));
             let _ = self.threshold_slider.SetValue2(lp as f64);
-            let _ = self.autostart.SetIsOn(auto);
         });
     }
 }
@@ -854,7 +851,7 @@ fn set_row_control(row: &Grid, ctl: &UIElement) -> Result<()> {
     Ok(())
 }
 
-/// 单开关卡片（中文锁定 / 开机自启）：左标签 + 右开关。
+/// 单开关卡片（中文锁定）：左标签 + 右开关。
 fn make_switch_card(label: &str, sw: &ToggleSwitch) -> Result<Border> {
     let row = make_setting_row(label, f64::from(ROW_H))?;
     set_row_control(&row, &sw.cast()?)?;
@@ -998,7 +995,7 @@ fn make_caps_card(items: &Items, dividers: &mut Vec<Border>) -> Result<Expander>
     Ok(items.caps_card.clone())
 }
 
-/// 底栏：右对齐的退出图标按钮。
+/// 底栏：右对齐的设置图标按钮（预留占位，暂无动作）。
 ///
 /// 不设背景、不设边框——背景即浮窗基底（亚克力本身），分隔线归上方内容区的底边。
 ///
@@ -1011,14 +1008,9 @@ fn make_footer() -> Result<Border> {
     bar.SetHorizontalAlignment(HorizontalAlignment::Right)?;
     bar.SetVerticalAlignment(VerticalAlignment::Center)?;
 
-    // U+E711 Cancel，取自 Segoe Fluent Icons，与系统底栏同款字形。
-    let quit = make_command_button("\u{E711}", "退出")?;
-    quit.Click(&RoutedEventHandler::new(|_, _| {
-        // 回调跑在消息循环所在线程，直接投 WM_QUIT 即可。
-        unsafe { PostQuitMessage(0) };
-        Ok(())
-    }))?;
-    bar.Children()?.Append(&quit)?;
+    // U+E713 Setting（齿轮），取自 Segoe Fluent Icons，与系统各处设置入口同款字形。
+    let settings = make_command_button("\u{E713}", "设置")?;
+    bar.Children()?.Append(&settings)?;
 
     let footer = Border::new()?;
     footer.SetMinHeight(f64::from(FOOTER_H))?;
@@ -1064,7 +1056,7 @@ fn make_command_button(glyph: &str, label: &str) -> Result<AppBarButton> {
     Ok(b)
 }
 
-/// 内容区：标题 + 四张设置卡片，底边带分隔线。
+/// 内容区：标题 + 三张设置卡片，底边带分隔线。
 ///
 /// 抬亮的是**内容区**而非底栏，这是照 `ContentDialog` 模板的归属：
 /// 内容区 `Background = ContentDialogTopOverlay`（→ `LayerFillColorAltBrush`），
@@ -1108,9 +1100,6 @@ fn make_content(
     panel.Children()?.Append(&header_group)?;
 
     panel.Children()?.Append(&make_caps_card(items, dividers)?)?;
-    let auto_card = make_switch_card("开机自启", &items.autostart)?;
-    panel.Children()?.Append(&auto_card)?;
-    cards.push(auto_card);
 
     let content = Border::new()?;
     content.SetBorderThickness(Thickness {
@@ -1257,7 +1246,6 @@ fn build() -> Result<Flyout> {
         caps_short: make_combo(&CAPS_ACTION_LABELS, CAPS_COMBO_W)?,
         caps_long: make_combo(&CAPS_ACTION_LABELS, CAPS_COMBO_W)?,
         threshold_slider,
-        autostart: make_toggle()?,
     };
     bind_controls(&items)?;
 
@@ -1365,10 +1353,6 @@ fn bind_controls(items: &Items) -> Result<()> {
     })?;
     bind_switch(&items.japanese, |v| {
         apply(|c| c.japanese_lock_enabled = v)
-    })?;
-    bind_switch(&items.autostart, |v| {
-        crate::autostart::set_autostart(v);
-        apply(|c| c.autostart = v);
     })?;
 
     bind_combo(&items.japanese_mode, |i| {

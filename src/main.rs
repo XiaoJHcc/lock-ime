@@ -72,7 +72,7 @@ fn main() {
     let win_hooks = events::install();
     let kbd_hook = keyboard::install();
 
-    // 浮窗需在托盘之前初始化：Tray::new 依据其可用性决定挂不挂原生菜单。
+    // 浮窗需在托盘之前初始化：Tray::new 依据其可用性决定挂精简菜单还是回退原生菜单。
     // 失败（未装 WindowsAppRuntime）时回退原生菜单，不影响主功能。
     flyout::init();
 
@@ -204,12 +204,14 @@ fn run_message_loop(tray: Option<&tray::Tray>) {
         // 托盘点击。两个 receiver 都是全局无界 channel，无论走哪条路径都要排空，
         // 否则未消费的事件会一直堆着。
         //
-        // 只认 Up：菜单弹出绑定在 Down，两个状态都响应会让一次点击触发两次。
-        // 浮窗不可用时 toggle_at 是空操作，此时托盘挂的是原生菜单，走下面的分支。
+        // 只认左键的 Up：右键菜单弹出绑定在 Down，且挂了菜单后右键事件照样会发；
+        // 两个状态都响应还会让一次点击触发两次。
+        // 浮窗不可用时 toggle_at 是空操作，此时托盘挂的是回退原生菜单，走下面的分支。
         while let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
             if let tray_icon::TrayIconEvent::Click {
-                rect,
+                button: tray_icon::MouseButton::Left,
                 button_state: tray_icon::MouseButtonState::Up,
+                rect,
                 ..
             } = event
             {
@@ -217,7 +219,7 @@ fn run_message_loop(tray: Option<&tray::Tray>) {
             }
         }
 
-        // 原生菜单事件（回退路径）。
+        // 菜单事件（浮窗路径的精简菜单 / 回退路径的原生菜单）。
         if let Some(tray) = tray {
             while let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
                 if tray.handle(&event.id) {

@@ -1,4 +1,12 @@
 //! 系统托盘图标与菜单。
+//!
+//! 左右键分工：
+//!  * 左键不挂菜单（`with_menu_on_left_click(false)`）：只发 TrayIconEvent，
+//!    由主循环拨动浮窗；
+//!  * 右键挂 muda 菜单，由 tray-icon 内置的 TrackPopupMenu 弹出——
+//!    Win11 下即系统样式的圆角右键菜单。
+//!    浮窗可用时是精简菜单（开机自启勾选 / 设置（预留禁用）/ 退出）；
+//!    浮窗不可用（未装 WindowsAppRuntime）时回退完整原生菜单。
 
 use crate::autostart;
 use crate::config::{CapslockAction, JapaneseMode};
@@ -7,8 +15,20 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 pub struct Tray {
     _tray: TrayIcon,
-    /// 原生菜单，仅在浮窗不可用时创建；可用时托盘不挂菜单，右键也交给浮窗。
+    /// 浮窗路径的精简右键菜单。
+    flyout_menu: Option<FlyoutMenu>,
+    /// 回退路径的完整原生菜单（浮窗不可用时才创建）。
     menu: Option<NativeMenu>,
+}
+
+/// 浮窗路径的精简菜单及其条目：开机自启勾选 / 设置（预留）/ 退出。
+///
+/// 「设置」是禁用占位：Win32 设置窗口是浮窗不可用时的保底路径（见
+/// settings_window.rs），浮窗模式下不提供任何进入它的入口。
+struct FlyoutMenu {
+    _menu: Menu,
+    autostart: CheckMenuItem,
+    quit: MenuItem,
 }
 
 /// 回退路径用的原生菜单及其条目。
@@ -40,37 +60,93 @@ fn make_icon() -> Option<Icon> {
 }
 
 impl Tray {
-    /// 依据当前配置创建托盘。浮窗可用时不建原生菜单。
+    /// 依据当前配置创建托盘。浮窗可用时挂精简菜单，否则回退完整原生菜单。
     pub fn new() -> Option<Tray> {
         let mut builder = TrayIconBuilder::new().with_tooltip("lock-ime");
         if let Some(icon) = make_icon() {
             builder = builder.with_icon(icon);
         }
 
-        // 挂了菜单，右键会被 tray-icon 的 TrackPopupMenu 抢先接管，收不到
-        // TrayIconEvent；不挂则左右键都只发事件，由主循环转给浮窗。
-        let menu = if crate::flyout::is_available() {
+        // 挂了菜单，右键会被 tray-icon 的 TrackPopupMenu 抢先接管（事件照样会发，
+        // 主循环须只认左键）；左键不挂菜单只发事件，由主循环转给浮窗。
+        let (flyout_menu, menu) = if crate::flyout::is_available() {
             builder = builder.with_menu_on_left_click(false);
-            None
+            let m = FlyoutMenu::new()?;
+            builder = builder.with_menu(Box::new(m._menu.clone()));
+            (Some(m), None)
         } else {
             let m = NativeMenu::new()?;
             builder = builder.with_menu(Box::new(m._menu.clone()));
-            Some(m)
+            (None, Some(m))
         };
 
-        Some(Tray { _tray: builder.build().ok()?, menu })
+        Some(Tray {
+            _tray: builder.build().ok()?,
+            flyout_menu,
+            menu,
+        })
     }
 
-    /// 从当前配置同步菜单勾选状态与日文标签。浮窗路径下无菜单可同步。
+    /// 从当前配置同步菜单勾选状态与日文标签。
     pub fn refresh(&self) {
+        if let Some(m) = &self.flyout_menu {
+            m.refresh();
+        }
         if let Some(m) = &self.menu {
             m.refresh();
         }
     }
 
-    /// 处理一次原生菜单事件。返回 true 表示请求退出程序。
+    /// 处理一次菜单事件。返回 true 表示请求退出程序。
     pub fn handle(&self, id: &MenuId) -> bool {
+        if let Some(m) = &self.flyout_menu {
+            return m.handle(id);
+        }
         self.menu.as_ref().is_some_and(|m| m.handle(id))
+    }
+}
+
+impl FlyoutMenu {
+    fn new() -> Option<FlyoutMenu> {
+        let auto = crate::state::with(|st| st.config.autostart)?;
+        let autostart = CheckMenuItem::new("开机自启", true, auto, None);
+        // 预留占位：禁用态，不会产生事件（原因见结构体注释）。
+        let settings = MenuItem::new("设置", false, None);
+        let quit = MenuItem::new("退出", true, None);
+
+        let menu = Menu::new();
+        menu.append(&autostart).ok()?;
+        menu.append(&settings).ok()?;
+        menu.append(&PredefinedMenuItem::separator()).ok()?;
+        menu.append(&quit).ok()?;
+
+        Some(FlyoutMenu {
+            _menu: menu,
+            autostart,
+            quit,
+        })
+    }
+
+    /// 设置窗口可能改动自启配置，从配置现读同步勾选。
+    fn refresh(&self) {
+        let auto = crate::state::with(|st| st.config.autostart).unwrap_or(false);
+        self.autostart.set_checked(auto);
+    }
+
+    fn handle(&self, id: &MenuId) -> bool {
+        if id == self.quit.id() {
+            return true;
+        }
+        if id == self.autostart.id() {
+            // muda 在投事件前已翻转勾选态，is_checked 即用户意图。
+            let v = self.autostart.is_checked();
+            autostart::set_autostart(v);
+            crate::state::with(|st| {
+                st.config.autostart = v;
+                let _ = st.config.save();
+            });
+        }
+        false
     }
 }
 
