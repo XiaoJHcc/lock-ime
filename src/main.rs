@@ -37,7 +37,7 @@ pub const TIMER_CAPS: usize = 2;
 pub const TIMER_SWITCH: usize = 3;
 /// 周期看门狗 timer：焦点不变时也会被 Shift/云输入等翻成英文，需定期扳回。
 pub const TIMER_WATCHDOG: usize = 4;
-/// 浮窗收起动画落定后收缩窗口的一次性 timer（见 flyout::on_expand_state）。
+/// 浮窗高度动画的逐帧驱动 timer（见 flyout::on_anim_tick）。
 pub const TIMER_FLYOUT_ANIM: usize = 5;
 
 /// 看门狗周期（毫秒）。apply 是幂等的（状态一致时不下发），轮询开销极小；

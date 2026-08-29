@@ -18,8 +18,8 @@
 use crate::config::{CapslockAction, JapaneseMode};
 use std::cell::{Cell, RefCell};
 use windows::core::{h, IInspectable, Interface, Ref, Result, BOOL, HSTRING};
-use windows::Foundation::{IReference, PropertyValue, TimeSpan, TypedEventHandler};
-use windows::Graphics::{RectInt32, SizeInt32};
+use windows::Foundation::{PropertyValue, TypedEventHandler};
+use windows::Graphics::SizeInt32;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_COLOR_DEFAULT, DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -43,16 +43,13 @@ use winui3::Microsoft::UI::Xaml::Controls::Primitives::{
 use winui3::Microsoft::UI::Xaml::Controls::{
     AppBarButton, Border, ColumnDefinition, ComboBox, ComboBoxItem, CommandBarLabelPosition,
     Expander, ExpanderCollapsedEventArgs, ExpanderExpandingEventArgs, FontIcon, Grid, Orientation,
-    SelectionChangedEventHandler, Slider, StackPanel, TextBlock, ToggleSwitch,
+    RowDefinition, SelectionChangedEventHandler, Slider, StackPanel, TextBlock, ToggleSwitch,
     XamlControlsResources,
 };
 use winui3::Microsoft::UI::Xaml::Hosting::{DesktopWindowXamlSource, WindowsXamlManager};
-use winui3::Microsoft::UI::Xaml::Media::Animation::{
-    CubicEase, DoubleAnimation, EasingMode, Storyboard, Timeline,
-};
-use winui3::Microsoft::UI::Xaml::Media::{Brush, CompositeTransform, DesktopAcrylicBackdrop};
+use winui3::Microsoft::UI::Xaml::Media::{Brush, DesktopAcrylicBackdrop};
 use winui3::Microsoft::UI::Xaml::{
-    Application, CornerRadius, Duration, DurationType, ElementTheme, FrameworkElement, GridLength,
+    Application, CornerRadius, ElementTheme, FrameworkElement, GridLength,
     GridUnitType, HorizontalAlignment, LaunchActivatedEventArgs, ResourceDictionary,
     RoutedEventHandler, Thickness, UIElement, VerticalAlignment,
 };
@@ -194,11 +191,6 @@ impl Items {
     }
 }
 
-/// ease-out cubic。
-fn ease_out(t: f64) -> f64 {
-    1.0 - (1.0 - t).powi(3)
-}
-
 struct Flyout {
     // 以下三个句柄必须保活到进程结束：drop 会卸载运行时/XAML 上下文。
     _dep: PackageDependency,
@@ -210,21 +202,15 @@ struct Flyout {
     items: Items,
     /// 显式设了主题画刷的元素集合，主题切换时重刷（见 apply_theme_brushes）。
     themed: Themed,
-    /// 根容器：收起时切为贴底（Bottom），下部内容屏幕位置在塌缩前后天然不变。
-    root: StackPanel,
-    /// 上部内容组（标题+卡1+卡2）与 CapsLock 卡的 RenderTransform：
-    /// 展开时由 storyboard 驱动（合成线程插值），呈现「上面部分上移」。
-    header_xform: CompositeTransform,
-    caps_xform: CompositeTransform,
-    /// 展开位移动画的 storyboard（收起/隐藏时若还在播要停掉）。
-    expand_sb: Option<Storyboard>,
+    /// 收起延迟的起点时刻（None = 无待落定的收起；展开无延迟，见 on_expand_state）。
+    collapse_start: Option<std::time::Instant>,
+    /// 窗口当前物理高度。
+    cur_h: i32,
     visible: bool,
     /// 上次显示时锚定的托盘图标矩形，展开/收起时据此重新定位。
     anchor: Option<tray_icon::Rect>,
     /// 上次收起的时刻，用于识别「点托盘收起」这一手势，见 `toggle_at`。
     hidden_at: Option<std::time::Instant>,
-    /// 收起动画的起点时刻（None = 无收起动画；展开由 storyboard 自驱，无需 timer）。
-    collapse_start: Option<std::time::Instant>,
 }
 
 thread_local! {
@@ -316,25 +302,21 @@ pub fn refresh() {
     });
 }
 
-/// CapsLock 卡片展开/收起：驱动窗口动画（保持右缘与底边锚定）。
+/// CapsLock 卡片展开/收起：窗口一次性 resize 到目标高度（右缘与底边锚定），
+/// 过渡动画完全交给 Expander 模板自带的 clip 揭开/收回。
 ///
-/// 核心约束：XAML 岛场景下**逐帧 resize HWND 必然抽搐**——窗口尺寸走 DWM
-/// 合成，内容走 XAML swapchain，两条管线不同步，内容每帧重绘都滞后一拍。
-/// 因此窗口只在状态切换时一次到位，动画全部放在内容层（渲染级 RenderTransform
-/// 与模板 clip，均为合成线程处理）。
+/// 布局约定：内容顶对齐（标题与各卡片跟随窗口顶边），底栏吸底（Grid 底行，
+/// 窗口底边屏幕上不动 → 底栏始终不动）。窗口只在状态切换时动一次，中途没有
+/// 任何逐帧 resize，抖动在结构上不可能发生。
 ///
-///  * 展开——窗口一次长高到位（顶边外原本是透明区，瞬现的只是空白亚克力）；
-///    「标题+卡1+卡2+CapsLock 卡」的 RenderTransform 由 **storyboard**（合成线程
-///    按 vsync 插值，非 UI 线程逐帧 push）从 +EXPANDED_H 缓动到 0，呈现「上面
-///    部分上移」；展开区由模板 clip 揭开；下部内容布局位置不变，天然钉住。
-///  * 收起——内容贴底（模板塌缩前后下部内容屏幕位置不变）；塌缩（0.2s）落定后
-///    窗口逐帧收缩，期间 XAML 岛子窗口**保持全高、贴父窗口底边**（父窗口相当于
-///    视口，顶边下移只是裁掉岛的上部空白）——岛尺寸不变，内容零重绘，
-///    底栏与卡片纹丝不动。
+/// 勿回退的弯路：逐帧 resize 窗口做高度动画——WM_TIMER 非 vsync 驱动
+/// （默认 15.6ms 分辨率、tick 会延迟与合并），窗口是「几次大跳」而非逐帧；
+/// 且窗口尺寸（DWM 合成）与岛内容（XAML swapchain）两条管线相位差一拍，
+/// 每一跳都伴随内容滞后（曾截到内容区中间露出一条纯亚克力的帧）。
 ///
-/// 勿回退的弯路：逐帧 resize + 内容跟随（管线不同步抽搐）；UI 线程 16ms timer
-/// 逐帧 SetTranslateY（消息循环帧间隔不均，动画抖动）；ImplicitAnimations
-/// （下部内容在屏幕上平移而非钉住）。
+/// 代价：展开/收起时上方卡片随窗口顶边瞬移一档，无滑动过程。
+/// 收起延迟 ~210ms（等模板内容滑出+塌缩落定）再缩窗，否则展开区内容
+/// 会被窗口下缘提前裁掉。
 fn on_expand_state(expanded: bool) {
     FLYOUT.with(|c| {
         let mut borrow = c.borrow_mut();
@@ -342,29 +324,35 @@ fn on_expand_state(expanded: bool) {
         if !f.visible || f.anchor.is_none() {
             return;
         }
+        let anchor = f.anchor.unwrap();
         if expanded {
             f.stop_collapse();
-            let _ = f.root.SetVerticalAlignment(VerticalAlignment::Top);
-            let anchor = f.anchor.unwrap();
-            f.place(&anchor, f.phys_h(true), IslandPos::Fill); // 窗口一次到位
-            f.play_expand_slide();
+            f.cur_h = f.phys_h(true);
+            f.place(&anchor, f.cur_h); // 窗口一次到位，行内容由模板 clip 揭开
         } else {
-            f.stop_expand_slide(); // 展开动画在播则停（TranslateY 归位 0）
-            let _ = f.root.SetVerticalAlignment(VerticalAlignment::Bottom);
             f.collapse_start = Some(std::time::Instant::now());
             crate::state::with(|st| unsafe {
-                SetTimer(Some(st.hidden_hwnd), crate::TIMER_FLYOUT_ANIM, 16, None);
+                SetTimer(Some(st.hidden_hwnd), crate::TIMER_FLYOUT_ANIM, 210, None);
             });
         }
     });
 }
 
-/// 收起动画帧（hidden 窗口 WM_TIMER 周期驱动，见 main.rs）。
+/// 收起延迟落定（hidden 窗口 WM_TIMER 驱动，首发即停，见 main.rs）。
 pub fn on_anim_tick() {
     FLYOUT.with(|c| {
         let mut borrow = c.borrow_mut();
         let Some(f) = borrow.as_mut() else { return };
-        f.collapse_tick();
+        if f.collapse_start.is_none() {
+            return;
+        }
+        let Some(anchor) = f.anchor else {
+            f.stop_collapse();
+            return;
+        };
+        f.cur_h = f.phys_h(false);
+        f.place(&anchor, f.cur_h);
+        f.stop_collapse();
     });
 }
 
@@ -375,9 +363,16 @@ impl Flyout {
         panel_h(expanded) * dpi / 96
     }
 
+    fn stop_collapse(&mut self) {
+        if self.collapse_start.take().is_some() {
+            crate::state::with(|st| unsafe {
+                let _ = KillTimer(Some(st.hidden_hwnd), crate::TIMER_FLYOUT_ANIM);
+            });
+        }
+    }
+
     fn hide(&mut self) {
         self.stop_collapse();
-        self.stop_expand_slide();
         let _ = self.win.Hide();
         self.visible = false;
         self.hidden_at = Some(std::time::Instant::now());
@@ -385,11 +380,11 @@ impl Flyout {
 
     /// 依托盘图标位置定位并显示。坐标全程用物理像素，与 `tray_rect` 一致。
     fn show_at(&mut self, tray_rect: tray_icon::Rect) {
-        // 保险：停掉上次未播完的动画，位移补偿与对齐复位。
+        // 保险：停掉上次未落定的收起。
         self.stop_collapse();
-        self.stop_expand_slide();
-        let _ = self.root.SetVerticalAlignment(VerticalAlignment::Top);
-        self.layout_at(&tray_rect, self.items.caps_card.IsExpanded().unwrap_or(false));
+        let expanded = self.items.caps_card.IsExpanded().unwrap_or(false);
+        self.layout_at(&tray_rect, expanded);
+        self.cur_h = self.phys_h(expanded);
         self.anchor = Some(tray_rect);
 
         // 定好位再显示，避免弹出瞬间先在上一次的旧位置闪一下。
@@ -407,14 +402,17 @@ impl Flyout {
 
     /// 按展开状态确定尺寸并定位：右缘对齐托盘图标，底边贴在图标上方。
     fn layout_at(&self, tray_rect: &tray_icon::Rect, expanded: bool) {
-        self.place(tray_rect, self.phys_h(expanded), IslandPos::Fill);
+        self.place(tray_rect, self.phys_h(expanded));
     }
 
     /// 把窗口放到指定物理高度：宽不变，右缘对齐托盘图标，底边贴在图标上方。
     ///
-    /// 位置与尺寸用一次 `MoveAndResize` 原子完成——拆成 ResizeClient + Move 两步时，
-    /// DWM 可能在两步之间合成出「尺寸已变、位置未变」的中间帧。
-    fn place(&self, tray_rect: &tray_icon::Rect, ph: i32, island: IslandPos) {
+    /// 用同步的 `SetWindowPos` 而非 `AppWindow::MoveAndResize`：后者经 WinUI 窗口
+    /// 框架异步落地，逐帧动画时与随后 island 的同步 SetWindowPos 差一拍——
+    /// 上方卡片跟随 island 顶边（position 语义）不受影响，底栏钉在 island 底边
+    /// （size 语义）就会逐帧弹跳。SetWindowPos 同样原子完成移动+尺寸（本窗口
+    /// 无标题栏/边框，客户区与外框的尺寸语义差异不成立）。
+    fn place(&self, tray_rect: &tray_icon::Rect, ph: i32) {
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as i32;
         let s = |v: i32| v * dpi / 96;
         let pw = s(PANEL_W);
@@ -428,104 +426,12 @@ impl Flyout {
             x = x.clamp(wa.left, (wa.right - pw).max(wa.left));
             y = y.clamp(wa.top, (wa.bottom - ph).max(wa.top));
         }
-        // 本窗口无标题栏/边框（BorderAndTitleBar 已关），外框即客户区，
-        // MoveAndResize 的尺寸语义差异在此不成立。
-        if let Err(e) = self.win.MoveAndResize(RectInt32 {
-            X: x,
-            Y: y,
-            Width: pw,
-            Height: ph,
-        }) {
-            crate::logmsg!("flyout: MoveAndResize failed 0x{:08X}", e.code().0);
+        if let Err(e) = unsafe {
+            SetWindowPos(self.hwnd, None, x, y, pw, ph, SWP_NOZORDER | SWP_NOACTIVATE)
+        } {
+            crate::logmsg!("flyout: SetWindowPos failed 0x{:08X}", e.code().0);
         }
-        unsafe { position_island(self.hwnd, island, self.phys_h(true)) }
-    }
-
-    /// 展开位移动画：storyboard 驱动两个 RenderTransform 的 TranslateY
-    /// 从 +EXPANDED_H 缓动到 0（合成线程插值，不经消息循环）。
-    fn play_expand_slide(&mut self) {
-        if let Some(sb) = &self.expand_sb {
-            let _ = sb.Stop();
-        }
-        match self.build_expand_slide() {
-            Ok(sb) => self.expand_sb = Some(sb),
-            Err(e) => {
-                crate::logmsg!("flyout: expand slide failed 0x{:08X}", e.code().0);
-                self.set_ty(0.0); // 退化：直接归位，无动画
-                self.expand_sb = None;
-            }
-        }
-    }
-
-    fn build_expand_slide(&self) -> Result<Storyboard> {
-        let sb = Storyboard::new()?;
-        for xform in [&self.header_xform, &self.caps_xform] {
-            let anim = DoubleAnimation::new()?;
-            anim.SetFrom(
-                &PropertyValue::CreateDouble(f64::from(EXPANDED_H))?.cast::<IReference<f64>>()?,
-            )?;
-            anim.SetTo(&PropertyValue::CreateDouble(0.0)?.cast::<IReference<f64>>()?)?;
-            anim.cast::<Timeline>()?.SetDuration(Duration {
-                TimeSpan: TimeSpan { Duration: 333 * 10_000 }, // 对齐模板 ExpandDown
-                Type: DurationType::TimeSpan,
-            })?;
-            let ease = CubicEase::new()?;
-            ease.SetEasingMode(EasingMode::EaseOut)?;
-            anim.SetEasingFunction(&ease)?;
-            Storyboard::SetTarget(&anim, xform)?;
-            Storyboard::SetTargetProperty(&anim, h!("TranslateY"))?;
-            sb.Children()?.Append(&anim)?;
-        }
-        sb.Begin()?;
-        Ok(sb)
-    }
-
-    fn stop_expand_slide(&mut self) {
-        if let Some(sb) = self.expand_sb.take() {
-            let _ = sb.Stop();
-        }
-        self.set_ty(0.0);
-    }
-
-    /// 收起动画帧：前 210ms 等模板塌缩落定，之后逐帧收缩窗口（岛贴底不动）。
-    fn collapse_tick(&mut self) {
-        let Some(start) = self.collapse_start else { return };
-        let Some(anchor) = self.anchor else {
-            self.stop_collapse();
-            return;
-        };
-        let el = start.elapsed().as_secs_f64();
-        if el < 0.21 {
-            return; // 内容滑出（0.167s）+ 塌缩（0.2s）落定前不动窗口
-        }
-        let t = ((el - 0.21) / 0.167).min(1.0); // 对齐模板 CollapseDown 时长
-        let done = t >= 1.0;
-        // 收缩期间岛保持全高贴底（内容零重绘）；落定帧恢复铺满。
-        let island = if done { IslandPos::Fill } else { IslandPos::AnchorBottom };
-        let collapsed = self.phys_h(false);
-        let delta = self.phys_h(true) - collapsed;
-        self.place(
-            &anchor,
-            collapsed + (delta as f64 * (1.0 - ease_out(t))).round() as i32,
-            island,
-        );
-        if done {
-            self.stop_collapse();
-        }
-    }
-
-    fn stop_collapse(&mut self) {
-        if self.collapse_start.take().is_some() {
-            crate::state::with(|st| unsafe {
-                let _ = KillTimer(Some(st.hidden_hwnd), crate::TIMER_FLYOUT_ANIM);
-            });
-        }
-    }
-
-    /// 设置上部内容组与 CapsLock 卡的渲染级垂直位移（逻辑像素）。
-    fn set_ty(&self, ty: f64) {
-        let _ = self.header_xform.SetTranslateY(ty);
-        let _ = self.caps_xform.SetTranslateY(ty);
+        unsafe { position_island(self.hwnd) }
     }
 }
 
@@ -624,72 +530,46 @@ fn work_area() -> Option<RECT> {
     ok.is_ok().then_some(rc)
 }
 
-/// XAML 岛子窗口的摆位方式。
-#[derive(Clone, Copy)]
-enum IslandPos {
-    /// 铺满父窗口客户区（常规状态）。
-    Fill,
-    /// 岛保持展开态全高、贴父窗口底边：父窗口收缩时相当于视口，顶边下移
-    /// 只是裁掉岛的上部（贴底布局下那里是空白）。岛尺寸不变 → 内容零重绘
-    /// 零重排，这是收起动画底栏不抽搐的关键。
-    AnchorBottom,
-}
-
-/// 摆放 XAML 岛的输入站点子窗口。
+/// 让 XAML 岛的输入站点子窗口铺满父窗口客户区。
 ///
 /// `DesktopWindowXamlSource` 的内容宿主在一个子窗口（InputSiteWindowClass）里，
 /// 它只在首次显示时取父窗口客户区尺寸；之后窗口尺寸变化它也不跟随，
-/// 需要手动摆放。`island_h` 为 AnchorBottom 模式下的岛高（物理像素）。
-/// 正常情况只有一个子窗口；重复调用无害。
-unsafe fn position_island(hwnd: HWND, mode: IslandPos, island_h: i32) {
+/// 需要手动铺满。正常情况只有一个子窗口；重复调用无害。
+unsafe fn position_island(hwnd: HWND) {
     let mut rc = RECT::default();
     if unsafe { GetClientRect(hwnd, &mut rc) }.is_err() {
         return;
     }
-    let layout = IslandLayout {
-        rc,
-        mode,
-        island_h,
-    };
     unsafe {
         let _ = EnumChildWindows(
             Some(hwnd),
-            Some(enum_child_layout),
-            LPARAM(&layout as *const IslandLayout as isize),
+            Some(enum_child_fill),
+            LPARAM(&rc as *const RECT as isize),
         );
     }
 }
 
-struct IslandLayout {
-    rc: RECT,
-    mode: IslandPos,
-    island_h: i32,
-}
-
-unsafe extern "system" fn enum_child_layout(child: HWND, lparam: LPARAM) -> BOOL {
-    let l = unsafe { &*(lparam.0 as *const IslandLayout) };
-    let (w, h) = (l.rc.right - l.rc.left, l.rc.bottom - l.rc.top);
-    let (y, h) = match l.mode {
-        IslandPos::Fill => (0, h),
-        // 贴底：岛高固定，顶部（客户区高 - 岛高，可能为负）超出部分被父窗口裁掉。
-        IslandPos::AnchorBottom => (h - l.island_h, l.island_h),
-    };
+unsafe extern "system" fn enum_child_fill(child: HWND, lparam: LPARAM) -> BOOL {
+    let rc = unsafe { &*(lparam.0 as *const RECT) };
+    let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
     unsafe {
-        let _ = SetWindowPos(child, None, 0, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        let _ = SetWindowPos(child, None, 0, 0, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
     }
     BOOL(1)
 }
 
 /// 显式设了主题画刷的元素集合，供主题切换时重刷（见 apply_theme_brushes）。
 struct Themed {
-    /// 普通卡片（中文锁定/日文锁定/开机自启）：底色 + 描边。
+    /// 普通卡片（中文锁定/日文锁定）：底色 + 描边。
     cards: Vec<Border>,
     /// 展开区行间的分割线：背景即描边色。
     dividers: Vec<Border>,
     /// CapsLock 卡：Expander 默认模板本身就是卡片，底色/描边直接设在它身上。
     caps_card: Expander,
-    /// 内容区底板：LayerOnAcrylic 底色 + 底边分隔线描边（归属说明见 make_content）。
+    /// 内容区底板：LayerOnAcrylic 底色（归属说明见 make_content）。
     content: Border,
+    /// 底栏：顶边分隔线描边（归属说明见 make_footer）。
+    footer: Border,
     /// 主题画刷的来源字典：挂进 Application 的那份 XamlControlsResources。
     /// 激活失败时为 None，set_brush 回退到顶层 Lookup。
     dict: Option<ResourceDictionary>,
@@ -780,7 +660,7 @@ fn apply_theme_brushes(t: &Themed, theme: ElementTheme) {
         t.content.SetBackground(b)
     });
     let _ = set_brush(dict, theme, "CardStrokeColorDefaultBrush", |b| {
-        t.content.SetBorderBrush(b)
+        t.footer.SetBorderBrush(b)
     });
 }
 
@@ -997,7 +877,9 @@ fn make_caps_card(items: &Items, dividers: &mut Vec<Border>) -> Result<Expander>
 
 /// 底栏：右对齐的设置图标按钮（预留占位，暂无动作）。
 ///
-/// 不设背景、不设边框——背景即浮窗基底（亚克力本身），分隔线归上方内容区的底边。
+/// 不设背景——背景即浮窗基底（亚克力本身）。内容区与底栏之间的 1px 分隔线
+/// 挂在本 Border 的**顶边**：高度动画期间内容区与吸底的底栏之间会出现空档，
+/// 分隔线必须跟随底栏（窗口底边），挂在内容区底边会悬空。
 ///
 /// 左右内边距与内容区取同一个值：`ContentDialog` 模板里 `CommandSpace.Padding`
 /// 和内容区 Padding 绑的是同一个键 `ContentDialogPadding`，底栏并非通栏无边距；
@@ -1013,6 +895,12 @@ fn make_footer() -> Result<Border> {
     bar.Children()?.Append(&settings)?;
 
     let footer = Border::new()?;
+    footer.SetBorderThickness(Thickness {
+        Left: 0.0,
+        Top: 1.0,
+        Right: 0.0,
+        Bottom: 0.0,
+    })?;
     footer.SetMinHeight(f64::from(FOOTER_H))?;
     let pad = f64::from(CONTENT_PAD_V);
     footer.SetPadding(Thickness {
@@ -1056,23 +944,21 @@ fn make_command_button(glyph: &str, label: &str) -> Result<AppBarButton> {
     Ok(b)
 }
 
-/// 内容区：标题 + 三张设置卡片，底边带分隔线。
+/// 内容区：标题 + 三张设置卡片。
 ///
 /// 抬亮的是**内容区**而非底栏，这是照 `ContentDialog` 模板的归属：
 /// 内容区 `Background = ContentDialogTopOverlay`（→ `LayerFillColorAltBrush`），
 /// 底栏 `Background = {TemplateBinding Background}` 即对话框基底、不做抬亮，
 /// 视觉上是「上亮下透」。浮窗坐在亚克力上，故换成 `LayerOnAcrylic` 那一支。
+/// 内容区在 Grid 的 Star 行里默认纵向 Stretch，高度动画期间的空档也随之抬亮。
 ///
-/// 分隔线同样归内容区：模板里 `BorderThickness="0,0,0,1"` 挂在内容区**底边**。
-///
-/// 额外返回上部内容组（标题+卡1+卡2）的引用：展开动画时它与 CapsLock 卡一起
-/// 做「上面部分上移」的位移过渡（见 on_expand_state / anim_tick）。
+/// 内容区与底栏之间的分隔线挂在底栏顶边（原因见 make_footer）。
 /// `cards`/`dividers` 收集显式设主题画刷的元素，供 apply_theme_brushes 重刷。
 fn make_content(
     items: &Items,
     cards: &mut Vec<Border>,
     dividers: &mut Vec<Border>,
-) -> Result<(Border, StackPanel)> {
+) -> Result<Border> {
     let panel = StackPanel::new()?;
     panel.SetSpacing(f64::from(CARD_GAP))?;
 
@@ -1086,28 +972,18 @@ fn make_content(
         Right: 0.0,
         Bottom: 2.0,
     })?;
+    panel.Children()?.Append(&title)?;
 
-    // 上部内容打包成组：展开动画期间整组位移（间距与外层一致，布局无差别）。
-    let header_group = StackPanel::new()?;
-    header_group.SetSpacing(f64::from(CARD_GAP))?;
-    header_group.Children()?.Append(&title)?;
     let cn_card = make_switch_card("中文锁定", &items.chinese)?;
-    header_group.Children()?.Append(&cn_card)?;
+    panel.Children()?.Append(&cn_card)?;
     cards.push(cn_card);
     let ja_card = make_japanese_card(items)?;
-    header_group.Children()?.Append(&ja_card)?;
+    panel.Children()?.Append(&ja_card)?;
     cards.push(ja_card);
-    panel.Children()?.Append(&header_group)?;
 
     panel.Children()?.Append(&make_caps_card(items, dividers)?)?;
 
     let content = Border::new()?;
-    content.SetBorderThickness(Thickness {
-        Left: 0.0,
-        Top: 0.0,
-        Right: 0.0,
-        Bottom: 1.0,
-    })?;
     let pad = f64::from(CONTENT_PAD_V);
     content.SetPadding(Thickness {
         Left: pad,
@@ -1116,7 +992,7 @@ fn make_content(
         Bottom: pad,
     })?;
     content.SetChild(&panel)?;
-    Ok((content, header_group))
+    Ok(content)
 }
 
 /// 把配置写回并落盘。各控件事件共用，避免重复。
@@ -1209,11 +1085,18 @@ fn build() -> Result<Flyout> {
     let src = trystep!("xaml_source", DesktopWindowXamlSource::new());
     trystep!("xaml_init", src.Initialize(win.Id()?));
 
-    // 根容器用顶对齐 StackPanel 而非 Star/Auto Grid：展开/收起的窗口高度动画
-    // 逐帧 resize 时，内容各元素的位置不随容器高度变化（顶对齐零重排），
-    // 这是动画不抽搐的关键——Grid 的 Star 行会让底栏每帧跟随窗口底边重排，
-    // XAML 岛的布局滞后一拍，表现为内容位置疯狂抽搐。
-    let root = trystep!("root", StackPanel::new());
+    // 根容器：内容行（Star）+ 底栏行（Auto）的 Grid。高度动画逐帧 resize 时，
+    // 内容顶对齐跟随窗口顶边，底栏钉在窗口底边（屏幕上不动），
+    // 展开区在两者之间的空档里由模板 clip 揭开，不顶起任何控件。
+    let root = trystep!("root", Grid::new());
+    for t in [GridUnitType::Star, GridUnitType::Auto] {
+        let row = RowDefinition::new()?;
+        row.SetHeight(GridLength {
+            Value: 1.0,
+            GridUnitType: t,
+        })?;
+        root.RowDefinitions()?.Append(&row)?;
+    }
 
     // 必须在任何 make_card / theme_brush 之前：控件模板与主题画刷都在这份字典里。
     // 合并到 Application 级而非 root；画刷另从这份字典的 ThemeDictionaries 按
@@ -1251,25 +1134,20 @@ fn build() -> Result<Flyout> {
 
     let mut cards = Vec::new();
     let mut dividers = Vec::new();
-    let (content, header_group) = make_content(&items, &mut cards, &mut dividers)?;
+    let content = make_content(&items, &mut cards, &mut dividers)?;
+    let footer = make_footer()?;
     let themed = Themed {
         cards,
         dividers,
         caps_card: items.caps_card.clone(),
         content: content.clone(),
+        footer: footer.clone(),
         dict,
     };
+    Grid::SetRow(&content, 0)?;
     root.Children()?.Append(&content)?;
-
-    let footer = make_footer()?;
+    Grid::SetRow(&footer, 1)?;
     root.Children()?.Append(&footer)?;
-
-    // 展开动画期间做「上面部分上移」的渲染级位移（RenderTransform 不影响布局，
-    // 逐帧设置即时生效，见 anim_tick）。
-    let header_xform = CompositeTransform::new()?;
-    header_group.SetRenderTransform(&header_xform)?;
-    let caps_xform = CompositeTransform::new()?;
-    items.caps_card.SetRenderTransform(&caps_xform)?;
 
     trystep!("set_content", src.SetContent(&root));
 
@@ -1326,7 +1204,7 @@ fn build() -> Result<Flyout> {
 
     win.Hide()?;
 
-    Ok(Flyout {
+    let mut flyout = Flyout {
         _dep: dep,
         _dqc: dqc,
         _mgr: mgr,
@@ -1335,15 +1213,14 @@ fn build() -> Result<Flyout> {
         hwnd,
         items,
         themed,
-        root,
-        header_xform,
-        caps_xform,
-        expand_sb: None,
+        collapse_start: None,
+        cur_h: 0,
         visible: false,
         anchor: None,
         hidden_at: None,
-        collapse_start: None,
-    })
+    };
+    flyout.cur_h = flyout.phys_h(false);
+    Ok(flyout)
 }
 
 /// 把控件事件绑到配置写入。所有回调先查 `is_syncing`：程序化写值（sync）不触发配置回写。
