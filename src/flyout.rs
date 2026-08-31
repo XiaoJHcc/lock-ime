@@ -18,7 +18,7 @@
 use crate::config::{CapslockAction, JapaneseMode};
 use std::cell::{Cell, RefCell};
 use windows::core::{h, IInspectable, Interface, Ref, Result, BOOL, HSTRING};
-use windows::Foundation::{PropertyValue, TypedEventHandler};
+use windows::Foundation::{IReference, PropertyValue, TimeSpan, TypedEventHandler};
 use windows::Graphics::SizeInt32;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Dwm::{
@@ -47,9 +47,12 @@ use winui3::Microsoft::UI::Xaml::Controls::{
     XamlControlsResources,
 };
 use winui3::Microsoft::UI::Xaml::Hosting::{DesktopWindowXamlSource, WindowsXamlManager};
-use winui3::Microsoft::UI::Xaml::Media::{Brush, DesktopAcrylicBackdrop};
+use winui3::Microsoft::UI::Xaml::Media::Animation::{
+    CubicEase, DoubleAnimation, EasingMode, Storyboard, Timeline,
+};
+use winui3::Microsoft::UI::Xaml::Media::{Brush, CompositeTransform, DesktopAcrylicBackdrop};
 use winui3::Microsoft::UI::Xaml::{
-    Application, CornerRadius, ElementTheme, FrameworkElement, GridLength,
+    Application, CornerRadius, Duration, DurationType, ElementTheme, FrameworkElement, GridLength,
     GridUnitType, HorizontalAlignment, LaunchActivatedEventArgs, ResourceDictionary,
     RoutedEventHandler, Thickness, UIElement, VerticalAlignment,
 };
@@ -79,8 +82,13 @@ const EXP_ROW_H: i32 = 48;
 /// 明显大于行间。水平 16 保留（行内容恰好与头部文字左对齐）；
 /// 分割线用等值负外边距抵消它，达到系统设置那种通栏分割线的效果。
 const EXP_CONTENT_PAD: f64 = 16.0;
-/// Expander 展开区总高：3 行 + 2 条分割线 + 内容区底边描边 1（上下内边距已清零）。
-const EXPANDED_H: i32 = EXP_ROW_H * 3 + 2 + 1;
+/// Expander 展开区总高：3 行 + 2 条行间分割线 + 内容区底边描边 1
+/// （ExpanderContentDownBorderThickness=1,0,1,1，模板自绘底边，无需补偿）
+/// + 2px 富余——窗口物理高度换算与 XAML 物理像素对齐都有取整损耗（实测
+/// 150% 缩放下只留 1px 富余仍裁掉底边描边），恰好卡等高度的分配会让
+/// 最后一张卡的底边描边被裁（Grid Star 行裁剪）。富余量表现为卡片下方
+/// 留白略增，无其他影响。
+const EXPANDED_H: i32 = EXP_ROW_H * 3 + 2 + 1 + 2;
 /// 标题行：FontSize 14 的单行文本约 20，加下边距 2。
 const TITLE_H: i32 = 22;
 /// 标题与各卡片间距，见 make_content 里 panel 的 Spacing。
@@ -202,6 +210,12 @@ struct Flyout {
     items: Items,
     /// 显式设了主题画刷的元素集合，主题切换时重刷（见 apply_theme_brushes）。
     themed: Themed,
+    /// 上部内容组（标题+卡1+卡2）与 CapsLock 卡的 RenderTransform：
+    /// 展开/收起时由 storyboard 驱动（合成线程插值），呈现「上面部分上移/下移」。
+    header_xform: CompositeTransform,
+    caps_xform: CompositeTransform,
+    /// 位移动画的 storyboard（状态切换/隐藏时若还在播要停掉）。
+    expand_sb: Option<Storyboard>,
     /// 收起延迟的起点时刻（None = 无待落定的收起；展开无延迟，见 on_expand_state）。
     collapse_start: Option<std::time::Instant>,
     /// 窗口当前物理高度。
@@ -303,20 +317,24 @@ pub fn refresh() {
 }
 
 /// CapsLock 卡片展开/收起：窗口一次性 resize 到目标高度（右缘与底边锚定），
-/// 过渡动画完全交给 Expander 模板自带的 clip 揭开/收回。
+/// 滑动过渡全部放在内容层（渲染级 RenderTransform + 模板 clip，合成线程处理）。
 ///
-/// 布局约定：内容顶对齐（标题与各卡片跟随窗口顶边），底栏吸底（Grid 底行，
-/// 窗口底边屏幕上不动 → 底栏始终不动）。窗口只在状态切换时动一次，中途没有
-/// 任何逐帧 resize，抖动在结构上不可能发生。
+/// 布局约定：内容顶对齐，底栏吸底（Grid 底行，窗口底边屏幕上不动 → 底栏
+/// 始终不动）。窗口只在状态切换时动一次，中途无任何逐帧 resize。
+///
+///  * 展开——窗口一次长高到位（顶边外瞬现的只是空白亚克力）；「标题+卡1+卡2
+///    +CapsLock 卡」的 RenderTransform 由 storyboard（合成线程按 vsync 插值，
+///    非 UI 线程逐帧 push）从 +EXPANDED_H 缓动到 0，呈现「上面部分上移」；
+///    展开区由模板 clip 揭开；底栏布局位置不变，天然钉住。
+///  * 收起——反向 storyboard 把上部内容组与 CapsLock 卡从 0 滑到 +EXPANDED_H
+///    （与模板塌缩同步进行），滑动的终点恰好是折叠态各卡片的屏幕位置；
+///    ~210ms 后窗口一次缩到折叠高度、TranslateY 归 0，两者无缝相接。
+///    缩窗前归位是必要的：否则展开区内容会被窗口下缘提前裁掉。
 ///
 /// 勿回退的弯路：逐帧 resize 窗口做高度动画——WM_TIMER 非 vsync 驱动
 /// （默认 15.6ms 分辨率、tick 会延迟与合并），窗口是「几次大跳」而非逐帧；
 /// 且窗口尺寸（DWM 合成）与岛内容（XAML swapchain）两条管线相位差一拍，
 /// 每一跳都伴随内容滞后（曾截到内容区中间露出一条纯亚克力的帧）。
-///
-/// 代价：展开/收起时上方卡片随窗口顶边瞬移一档，无滑动过程。
-/// 收起延迟 ~210ms（等模板内容滑出+塌缩落定）再缩窗，否则展开区内容
-/// 会被窗口下缘提前裁掉。
 fn on_expand_state(expanded: bool) {
     FLYOUT.with(|c| {
         let mut borrow = c.borrow_mut();
@@ -327,9 +345,15 @@ fn on_expand_state(expanded: bool) {
         let anchor = f.anchor.unwrap();
         if expanded {
             f.stop_collapse();
+            // 内容切回顶对齐：与上一收起接缝留下的「底对齐+岛贴底」态逐像素等价
+            // （顶对齐+TranslateY=+EXPANDED_H ≡ 底对齐+0），位图不变故无缝。
+            let _ = f.themed.content.SetVerticalAlignment(VerticalAlignment::Top);
             f.cur_h = f.phys_h(true);
-            f.place(&anchor, f.cur_h); // 窗口一次到位，行内容由模板 clip 揭开
+            f.place(&anchor, f.cur_h, IslandPos::Fill); // 窗口一次到位，行内容由模板 clip 揭开
+            f.play_slide(f64::from(EXPANDED_H), 0.0, 333); // 对齐模板 ExpandDown
         } else {
+            // 下滑与模板塌缩（~210ms）同步；窗口待其落定后再缩（见 on_anim_tick）。
+            f.play_slide(0.0, f64::from(EXPANDED_H), 200);
             f.collapse_start = Some(std::time::Instant::now());
             crate::state::with(|st| unsafe {
                 SetTimer(Some(st.hidden_hwnd), crate::TIMER_FLYOUT_ANIM, 210, None);
@@ -339,6 +363,12 @@ fn on_expand_state(expanded: bool) {
 }
 
 /// 收起延迟落定（hidden 窗口 WM_TIMER 驱动，首发即停，见 main.rs）。
+///
+/// 接缝帧设计：TranslateY 归 0 与「内容切底对齐」都是 XAML 侧改动，同一帧
+/// 落地且渲染位图与滑动终点逐像素相同（顶对齐+147 ≡ 底对齐+0）；窗口收缩
+/// 与岛贴底是同 tick 的同步 SetWindowPos，只裁掉岛上方的空白——岛尺寸不变、
+/// 内容零重排重绘，任何一拍的管线错位都只会多露/少露一帧空白亚克力，
+/// 内容本身不可能跳变。
 pub fn on_anim_tick() {
     FLYOUT.with(|c| {
         let mut borrow = c.borrow_mut();
@@ -350,17 +380,74 @@ pub fn on_anim_tick() {
             f.stop_collapse();
             return;
         };
+        f.stop_slide(); // 下滑动画已播完（200ms < 210ms），TranslateY 归 0
+        let _ = f.themed.content.SetVerticalAlignment(VerticalAlignment::Bottom);
         f.cur_h = f.phys_h(false);
-        f.place(&anchor, f.cur_h);
+        f.place(&anchor, f.cur_h, IslandPos::AnchorBottom);
         f.stop_collapse();
     });
 }
 
 impl Flyout {
-    /// 物理高度（按窗口所在 DPI 换算）。
+    /// 物理高度（按窗口所在 DPI 换算）。向上取整：向下取整会让窗口有效逻辑
+    /// 高度小于 panel_h（如 150% 下 0.5 物理px的亏空），恰好等高的面板把亏空
+    /// 转嫁给最后一张卡，裁掉它的底边描边。
     fn phys_h(&self, expanded: bool) -> i32 {
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as i32;
-        panel_h(expanded) * dpi / 96
+        (panel_h(expanded) * dpi + 95) / 96
+    }
+
+    /// 位移动画：storyboard 驱动两个 RenderTransform 的 TranslateY
+    /// 从 `from` 缓动到 `to`（合成线程插值，不经消息循环）。
+    /// 展开 from=+EXPANDED_H to=0；收起反向。
+    fn play_slide(&mut self, from: f64, to: f64, ms: i64) {
+        if let Some(sb) = &self.expand_sb {
+            let _ = sb.Stop();
+        }
+        match self.build_slide(from, to, ms) {
+            Ok(sb) => self.expand_sb = Some(sb),
+            Err(e) => {
+                crate::logmsg!("flyout: slide failed 0x{:08X}", e.code().0);
+                self.set_ty(0.0); // 退化：直接归位，无动画
+                self.expand_sb = None;
+            }
+        }
+    }
+
+    fn build_slide(&self, from: f64, to: f64, ms: i64) -> Result<Storyboard> {
+        let sb = Storyboard::new()?;
+        for xform in [&self.header_xform, &self.caps_xform] {
+            let anim = DoubleAnimation::new()?;
+            anim.SetFrom(&PropertyValue::CreateDouble(from)?.cast::<IReference<f64>>()?)?;
+            anim.SetTo(&PropertyValue::CreateDouble(to)?.cast::<IReference<f64>>()?)?;
+            anim.cast::<Timeline>()?.SetDuration(Duration {
+                TimeSpan: TimeSpan {
+                    Duration: ms * 10_000,
+                },
+                Type: DurationType::TimeSpan,
+            })?;
+            let ease = CubicEase::new()?;
+            ease.SetEasingMode(EasingMode::EaseOut)?;
+            anim.SetEasingFunction(&ease)?;
+            Storyboard::SetTarget(&anim, xform)?;
+            Storyboard::SetTargetProperty(&anim, h!("TranslateY"))?;
+            sb.Children()?.Append(&anim)?;
+        }
+        sb.Begin()?;
+        Ok(sb)
+    }
+
+    fn stop_slide(&mut self) {
+        if let Some(sb) = self.expand_sb.take() {
+            let _ = sb.Stop();
+        }
+        self.set_ty(0.0);
+    }
+
+    /// 设置上部内容组与 CapsLock 卡的渲染级垂直位移（逻辑像素）。
+    fn set_ty(&self, ty: f64) {
+        let _ = self.header_xform.SetTranslateY(ty);
+        let _ = self.caps_xform.SetTranslateY(ty);
     }
 
     fn stop_collapse(&mut self) {
@@ -373,6 +460,7 @@ impl Flyout {
 
     fn hide(&mut self) {
         self.stop_collapse();
+        self.stop_slide();
         let _ = self.win.Hide();
         self.visible = false;
         self.hidden_at = Some(std::time::Instant::now());
@@ -380,8 +468,10 @@ impl Flyout {
 
     /// 依托盘图标位置定位并显示。坐标全程用物理像素，与 `tray_rect` 一致。
     fn show_at(&mut self, tray_rect: tray_icon::Rect) {
-        // 保险：停掉上次未落定的收起。
+        // 保险：停掉上次未落定的收起与未播完的展开动画。
         self.stop_collapse();
+        self.stop_slide();
+        let _ = self.themed.content.SetVerticalAlignment(VerticalAlignment::Top);
         let expanded = self.items.caps_card.IsExpanded().unwrap_or(false);
         self.layout_at(&tray_rect, expanded);
         self.cur_h = self.phys_h(expanded);
@@ -402,7 +492,7 @@ impl Flyout {
 
     /// 按展开状态确定尺寸并定位：右缘对齐托盘图标，底边贴在图标上方。
     fn layout_at(&self, tray_rect: &tray_icon::Rect, expanded: bool) {
-        self.place(tray_rect, self.phys_h(expanded));
+        self.place(tray_rect, self.phys_h(expanded), IslandPos::Fill);
     }
 
     /// 把窗口放到指定物理高度：宽不变，右缘对齐托盘图标，底边贴在图标上方。
@@ -412,7 +502,7 @@ impl Flyout {
     /// 上方卡片跟随 island 顶边（position 语义）不受影响，底栏钉在 island 底边
     /// （size 语义）就会逐帧弹跳。SetWindowPos 同样原子完成移动+尺寸（本窗口
     /// 无标题栏/边框，客户区与外框的尺寸语义差异不成立）。
-    fn place(&self, tray_rect: &tray_icon::Rect, ph: i32) {
+    fn place(&self, tray_rect: &tray_icon::Rect, ph: i32, island: IslandPos) {
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as i32;
         let s = |v: i32| v * dpi / 96;
         let pw = s(PANEL_W);
@@ -431,8 +521,19 @@ impl Flyout {
         } {
             crate::logmsg!("flyout: SetWindowPos failed 0x{:08X}", e.code().0);
         }
-        unsafe { position_island(self.hwnd) }
+        unsafe { position_island(self.hwnd, island, self.phys_h(true)) }
     }
+}
+
+/// XAML 岛子窗口的摆位方式。
+#[derive(Clone, Copy)]
+enum IslandPos {
+    /// 铺满父窗口客户区（常规状态）。
+    Fill,
+    /// 岛保持展开态全高、贴父窗口底边：父窗口收缩时相当于视口，顶边下移
+    /// 只是裁掉岛的上部（底对齐布局下那里是空白）。岛尺寸不变 → 内容零重绘
+    /// 零重排——收起接缝帧不跳变的关键（见 on_anim_tick）。
+    AnchorBottom,
 }
 
 /// 仅用于建立带样式 provider 的 Application 上下文；窗口由本模块自己建，
@@ -530,30 +631,47 @@ fn work_area() -> Option<RECT> {
     ok.is_ok().then_some(rc)
 }
 
-/// 让 XAML 岛的输入站点子窗口铺满父窗口客户区。
+/// 摆放 XAML 岛的输入站点子窗口。
 ///
 /// `DesktopWindowXamlSource` 的内容宿主在一个子窗口（InputSiteWindowClass）里，
 /// 它只在首次显示时取父窗口客户区尺寸；之后窗口尺寸变化它也不跟随，
-/// 需要手动铺满。正常情况只有一个子窗口；重复调用无害。
-unsafe fn position_island(hwnd: HWND) {
+/// 需要手动摆放。`island_h` 为 AnchorBottom 模式下的岛高（物理像素）。
+/// 正常情况只有一个子窗口；重复调用无害。
+unsafe fn position_island(hwnd: HWND, mode: IslandPos, island_h: i32) {
     let mut rc = RECT::default();
     if unsafe { GetClientRect(hwnd, &mut rc) }.is_err() {
         return;
     }
+    let layout = IslandLayout {
+        rc,
+        mode,
+        island_h,
+    };
     unsafe {
         let _ = EnumChildWindows(
             Some(hwnd),
-            Some(enum_child_fill),
-            LPARAM(&rc as *const RECT as isize),
+            Some(enum_child_layout),
+            LPARAM(&layout as *const IslandLayout as isize),
         );
     }
 }
 
-unsafe extern "system" fn enum_child_fill(child: HWND, lparam: LPARAM) -> BOOL {
-    let rc = unsafe { &*(lparam.0 as *const RECT) };
-    let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
+struct IslandLayout {
+    rc: RECT,
+    mode: IslandPos,
+    island_h: i32,
+}
+
+unsafe extern "system" fn enum_child_layout(child: HWND, lparam: LPARAM) -> BOOL {
+    let l = unsafe { &*(lparam.0 as *const IslandLayout) };
+    let (w, h) = (l.rc.right - l.rc.left, l.rc.bottom - l.rc.top);
+    let (y, h) = match l.mode {
+        IslandPos::Fill => (0, h),
+        // 贴底：岛高固定，顶部（客户区高 - 岛高，可能为负）超出部分被父窗口裁掉。
+        IslandPos::AnchorBottom => (h - l.island_h, l.island_h),
+    };
     unsafe {
-        let _ = SetWindowPos(child, None, 0, 0, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        let _ = SetWindowPos(child, None, 0, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
     }
     BOOL(1)
 }
@@ -822,7 +940,8 @@ fn make_caps_card(items: &Items, dividers: &mut Vec<Border>) -> Result<Expander>
     })?;
 
     // 展开区：三行（行高 EXP_ROW_H），行间通栏分割线，与系统设置的展开列表同形。
-    // 头部与第一行之间的分割线由模板自带，无需再加；末行之后也没有。
+    // 头部与第一行之间的分割线由模板自带，无需再加；末行之后也没有——卡片底边
+    // 描边由模板内容区 Border 自绘（ExpanderContentDownBorderThickness=1,0,1,1）。
     // 行本身不加外边距——模板展开区自带 16px 内边距，行内容恰好与头部文字左对齐；
     // 分割线则用负外边距抵消该内边距，画满卡片整宽。
     let rows = StackPanel::new()?;
@@ -950,15 +1069,17 @@ fn make_command_button(glyph: &str, label: &str) -> Result<AppBarButton> {
 /// 内容区 `Background = ContentDialogTopOverlay`（→ `LayerFillColorAltBrush`），
 /// 底栏 `Background = {TemplateBinding Background}` 即对话框基底、不做抬亮，
 /// 视觉上是「上亮下透」。浮窗坐在亚克力上，故换成 `LayerOnAcrylic` 那一支。
-/// 内容区在 Grid 的 Star 行里默认纵向 Stretch，高度动画期间的空档也随之抬亮。
+/// 内容区在 Grid 的 Star 行里默认纵向 Stretch，窗口一次到位后不留空档。
 ///
 /// 内容区与底栏之间的分隔线挂在底栏顶边（原因见 make_footer）。
+/// 额外返回上部内容组（标题+卡1+卡2）的引用：展开动画时它与 CapsLock 卡一起
+/// 做「上面部分上移」的位移过渡（见 on_expand_state）。
 /// `cards`/`dividers` 收集显式设主题画刷的元素，供 apply_theme_brushes 重刷。
 fn make_content(
     items: &Items,
     cards: &mut Vec<Border>,
     dividers: &mut Vec<Border>,
-) -> Result<Border> {
+) -> Result<(Border, StackPanel)> {
     let panel = StackPanel::new()?;
     panel.SetSpacing(f64::from(CARD_GAP))?;
 
@@ -972,14 +1093,18 @@ fn make_content(
         Right: 0.0,
         Bottom: 2.0,
     })?;
-    panel.Children()?.Append(&title)?;
 
+    // 上部内容打包成组：展开动画期间整组位移（间距与外层一致，布局无差别）。
+    let header_group = StackPanel::new()?;
+    header_group.SetSpacing(f64::from(CARD_GAP))?;
+    header_group.Children()?.Append(&title)?;
     let cn_card = make_switch_card("中文锁定", &items.chinese)?;
-    panel.Children()?.Append(&cn_card)?;
+    header_group.Children()?.Append(&cn_card)?;
     cards.push(cn_card);
     let ja_card = make_japanese_card(items)?;
-    panel.Children()?.Append(&ja_card)?;
+    header_group.Children()?.Append(&ja_card)?;
     cards.push(ja_card);
+    panel.Children()?.Append(&header_group)?;
 
     panel.Children()?.Append(&make_caps_card(items, dividers)?)?;
 
@@ -992,7 +1117,7 @@ fn make_content(
         Bottom: pad,
     })?;
     content.SetChild(&panel)?;
-    Ok(content)
+    Ok((content, header_group))
 }
 
 /// 把配置写回并落盘。各控件事件共用，避免重复。
@@ -1134,7 +1259,7 @@ fn build() -> Result<Flyout> {
 
     let mut cards = Vec::new();
     let mut dividers = Vec::new();
-    let content = make_content(&items, &mut cards, &mut dividers)?;
+    let (content, header_group) = make_content(&items, &mut cards, &mut dividers)?;
     let footer = make_footer()?;
     let themed = Themed {
         cards,
@@ -1148,6 +1273,13 @@ fn build() -> Result<Flyout> {
     root.Children()?.Append(&content)?;
     Grid::SetRow(&footer, 1)?;
     root.Children()?.Append(&footer)?;
+
+    // 展开动画期间做「上面部分上移」的渲染级位移（RenderTransform 不影响布局，
+    // 由 storyboard 在合成线程驱动，见 on_expand_state）。
+    let header_xform = CompositeTransform::new()?;
+    header_group.SetRenderTransform(&header_xform)?;
+    let caps_xform = CompositeTransform::new()?;
+    items.caps_card.SetRenderTransform(&caps_xform)?;
 
     trystep!("set_content", src.SetContent(&root));
 
@@ -1213,6 +1345,9 @@ fn build() -> Result<Flyout> {
         hwnd,
         items,
         themed,
+        header_xform,
+        caps_xform,
+        expand_sb: None,
         collapse_start: None,
         cur_h: 0,
         visible: false,
