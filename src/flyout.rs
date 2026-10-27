@@ -473,15 +473,17 @@ impl Flyout {
         self.stop_slide();
         let _ = self.themed.content.SetVerticalAlignment(VerticalAlignment::Top);
         let expanded = self.items.caps_card.IsExpanded().unwrap_or(false);
-        self.layout_at(&tray_rect, expanded);
-        self.cur_h = self.phys_h(expanded);
         self.anchor = Some(tray_rect);
 
-        // 定好位再显示，避免弹出瞬间先在上一次的旧位置闪一下。
         if self.win.ShowWithActivation(true).is_err() {
             return;
         }
         self.visible = true;
+
+        // WinUI 在重新显示时才同步新的 DPI；最终布局必须在这之后计算，
+        // 否则分辨率或缩放变化后的首次打开仍会沿用旧比例。
+        self.layout_at(&tray_rect, expanded);
+        self.cur_h = self.phys_h(expanded);
 
         // ShowWithActivation 抢不过任务栏的前台锁定：托盘点击后前台仍是
         // explorer，面板始终非激活，失焦判定会立刻把它收起。必须显式夺取。
